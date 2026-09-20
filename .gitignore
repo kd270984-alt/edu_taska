@@ -1,0 +1,7 @@
+.env
+.env.local
+node_modules/
+*.dump
+*.sql.gz
+bot/node_modules/
+api/node_modules/

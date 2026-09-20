@@ -1,0 +1,89 @@
+# Потолок журналов: без него docker пишет логи без конца и однажды забивает диск сервера.
+x-logging: &logs
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+name: taska-edu
+
+services:
+  postgres:
+    logging: *logs
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    logging: *logs
+    # Docker Hub отдаёт minio/minio только авторизованным — берём официальное зеркало на quay.io.
+    image: quay.io/minio/minio:latest
+    restart: always
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - miniodata:/data
+
+  api:
+    logging: *logs
+    image: node:22-alpine
+    restart: always
+    working_dir: /app
+    env_file: .env
+    volumes:
+      - ./api:/app
+    command: sh -c "npm ci --no-audit --no-fund || npm install --no-audit --no-fund; npm run start"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "3000"
+
+  caddy:
+    logging: *logs
+    image: caddy:2-alpine
+    restart: always
+    env_file: .env
+    ports:
+      # Локально: только петля — 127.0.0.1:8088. На сервере: HTTP_BIND=0.0.0.0:80, HTTPS_BIND=0.0.0.0:443.
+      - "${HTTP_BIND:-127.0.0.1:8088}:80"
+      - "${HTTPS_BIND:-127.0.0.1:8444}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./web:/srv/web:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      - api
+
+  # Телеграм-бот (необязательный). Запуск: docker compose --profile bot up -d
+  bot:
+    logging: *logs
+    image: node:22-alpine
+    restart: always
+    working_dir: /app
+    env_file: .env
+    environment:
+      TASKA_URL: http://caddy
+    volumes:
+      - ./bot:/app
+    command: sh -c "npm ci --no-audit --no-fund || npm install --no-audit --no-fund; npm run start"
+    depends_on:
+      - api
+    profiles: ["bot"]
+
+volumes:
+  pgdata:
+  miniodata:
+  caddydata:
+  caddyconfig:

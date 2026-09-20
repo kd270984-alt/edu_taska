@@ -1,0 +1,18 @@
+{
+  "name": "taska-edu-bot",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "selftest": "tsx src/selftest.ts",
+    "trybot": "tsx src/trybot.ts",
+    "checkmsg": "tsx src/checkmsg.ts",
+    "tryvoice": "tsx src/tryvoice.ts",
+    "checkparts": "tsx src/checkparts.ts"
+  },
+  "dependencies": {
+    "tsx": "^4.19.1",
+    "openai": "^4.104.0"
+  }
+}

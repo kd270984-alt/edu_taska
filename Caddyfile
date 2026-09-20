@@ -1,0 +1,36 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$APP_HOST} {
+	encode gzip
+
+	handle /api/* {
+		reverse_proxy api:3000
+	}
+
+	handle /ws* {
+		reverse_proxy api:3000
+	}
+
+	# Заголовки безопасности. Строгий CSP тут не поставить: весь фронт — один файл со встроенным
+	# скриптом и стилями, а 'unsafe-inline' сделал бы защиту декоративной. Поэтому запрещаем ровно то,
+	# что можно запретить без переписывания: плагины, чужие <base>, показ сайта в чужой рамке,
+	# угадывание типа файла и утечку адреса страницы наружу.
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "same-origin"
+		Content-Security-Policy "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+		-Server
+	}
+
+	handle {
+		root * /srv/web
+		# Не кэшируем — иначе после деплоя браузер показывает СТАРЫЙ код (фиксы/позиции «не подхватываются»).
+		# no-cache = браузер каждый раз ревалидирует по ETag (обложки → дешёвый 304, если не менялись).
+		header Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+}
