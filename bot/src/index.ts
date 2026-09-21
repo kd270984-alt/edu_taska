@@ -1,7 +1,7 @@
 // Телеграм-бот Таски: личная переписка, long polling (вебхук и домен не нужны).
 // Главное правило: человек получает ответ ВСЕГДА — даже когда Таска легла, модель молчит,
 // а сообщение пришло картинкой, стикером или голосом.
-import { api } from './taska.ts';
+import { api, API } from './taska.ts';
 import { answer, MODEL_READY, type Turn } from './agent.ts';
 import { attachmentKind, noTextReply, attachmentNote } from './msgkind.ts';
 import { transcribeTelegramFile } from './stt.ts';
@@ -191,6 +191,16 @@ async function main(): Promise<void> {
     }
   }
   console.log(`бот @${me.username} слушает личные сообщения`);
+  // Связь с Таской проверяем СРАЗУ, а не при первом сообщении. Иначе в журнале стоит бодрое
+  // «слушает сообщения», а человек в Телеграме получает «Таска сейчас не отвечает» — и ищи причину.
+  // Заодно проверяется пароль учётки агента: api() перед запросом входит в Таску.
+  try {
+    await api('/api/health');
+    console.log(`Таска отвечает (${API}) — бот готов`);
+  } catch (e) {
+    console.error(`НЕТ СВЯЗИ С ТАСКОЙ (${API}): ${(e as Error).message}`);
+    console.error('Проверьте TASKA_URL в docker-compose.yml и AGENT_EMAIL/AGENT_PASSWORD в .env.');
+  }
 
   let offset = 0;
   for (;;) {
