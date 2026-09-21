@@ -1,6 +1,6 @@
 // Клиент Таски для бота. Агент входит СВОЕЙ учёткой, а действует от имени человека:
 // заголовок X-Telegram-Id говорит серверу, за кого работать, и права проверяются как у него.
-const API = (process.env.TASKA_URL || 'http://caddy').replace(/\/+$/, '');
+const API = (process.env.TASKA_URL || 'http://api:3000').replace(/\/+$/, '');
 const EMAIL = process.env.AGENT_EMAIL || 'agent@taska.local';
 const PASSWORD = process.env.AGENT_PASSWORD || '';
 

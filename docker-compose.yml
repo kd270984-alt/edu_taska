@@ -74,7 +74,10 @@ services:
     working_dir: /app
     env_file: .env
     environment:
-      TASKA_URL: http://caddy
+      # ⚠️ Прямо в api, мимо Caddy. На сервере Caddy переводит http на https (код 308),
+      #    а сертификата на внутреннее имя «caddy» нет и быть не может — бот упирался
+      #    в оборванное рукопожатие и писал «Таска сейчас не отвечает».
+      TASKA_URL: http://api:3000
     volumes:
       - ./bot:/app
     command: sh -c "npm ci --no-audit --no-fund || npm install --no-audit --no-fund; npm run start"
