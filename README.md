@@ -208,12 +208,16 @@ docker compose down -v             # остановить и СТЕРЕТЬ ба
 Корзина и архив чистятся сами, раз в сутки: удалённое стирается насовсем через 30 дней
 (`TRASH_DAYS`), завершённое — через год (`ARCHIVE_DAYS`). Оба срока меняются в `.env`.
 
-Копию базы полезно снимать по расписанию. Строка для `crontab -e` (каждую ночь в 3:20,
-хранить месяц):
+Копию базы снимает `scripts/backup.sh`: делает дамп, сжимает, **проверяет, что архив не битый**,
+удаляет копии старше 30 дней (`BACKUP_KEEP_DAYS` в `.env`) и, если настроен телеграм-бот,
+пишет администратору — и когда копия готова, и когда не вышла. Строка для `crontab -e`
+(каждую ночь в 3:20):
 
 ```
-20 3 * * * cd /путь/к/taska-edu && docker compose exec -T postgres pg_dump -U taska taska | gzip > backups/$(date +\%F).sql.gz && find backups -name '*.sql.gz' -mtime +30 -delete
+20 3 * * * cd /путь/к/taska-edu && bash scripts/backup.sh >> backups/backup.log 2>&1
 ```
+
+Проверить сейчас: `bash scripts/backup.sh` — в `backups/` появится файл с сегодняшней датой.
 
 Вложения лежат в томе MinIO — его копируют отдельно (`docker run --rm -v taska-edu_minio:/data -v $PWD/backups:/b alpine tar czf /b/minio-$(date +%F).tgz /data`).
 

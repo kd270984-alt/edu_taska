@@ -1068,6 +1068,7 @@ function showToast(text, ms){
   const kill=()=>{ el.classList.remove('in'); setTimeout(()=>el.remove(),280); };
   const tm=setTimeout(kill, ms||2400);
   el.querySelector('.tx').onclick=()=>{ clearTimeout(tm); kill(); };
+  return ()=>{ clearTimeout(tm); kill(); };   // вернуть — чтобы позвавший мог убрать сообщение раньше срока
 }
 // следующая дата по циклу повторения (abs-день) после fromAbs
 function daysInMonth(y,m){ return new Date(Date.UTC(y,m+1,0)).getUTCDate(); }
@@ -1149,6 +1150,16 @@ const subCount=id=>(subCountCache[id]!=null?subCountCache[id]:allTasks.filter(z=
 const delTaskMsg=t=>{ const n=subCount(t.id); return 'Удалить задачу «'+t.name+'»?'+(n?' Вместе с ней уйдут подзадачи ('+n+').':'')+' Она уйдёт в корзину — вернуть можно там же, в «Моих задачах».'; };
 // управление задачей: текущий ответственный ИЛИ ответственный родительской задачи (см. ownsViaParent на сервере)
 const isMyTask=t=>!!me&&!!t&&(t.assignee_id===me.id||t.parent_assignee_id===me.id);
+// ⚠️ Отклик — СРАЗУ, сеть — следом. Раньше «Завершить» ждало ответа сервера, потом полной
+// перезагрузки задач и меток, потом переноса просроченных: три-четыре обращения подряд, и всё
+// это время экран не менялся, а потом прыгал разом. Теперь задача исчезает мгновенно, а если
+// сервер откажет — возвращается на место с честной ошибкой.
+function repaintLists(){ if(isMobileView()) renderMobile(); try{ refreshView(); }catch(e){} }
+function paintLocal(){ computeSlots(); wakeDraw(); repaintLists(); }
+function liveTask(t){ return (allTasks||[]).find(x=>x.id===t.id) || t; }
+function dropLocal(id){ const i=(allTasks||[]).findIndex(x=>x.id===id); if(i<0) return null;
+  const [gone]=allTasks.splice(i,1); paintLocal(); return gone; }
+function restoreLocal(t){ if(!t) return; allTasks.push(t); paintLocal(); }
 // Завершение задачи — ОДНА логика для кнопки в карточке и для меню ПКМ по плашке.
 // Повторяющаяся не уходит в архив, а переносится на следующую дату цикла. onDone — что сделать до reload (закрыть карточку).
 async function finishTask(t, rec, onDone){
@@ -1159,20 +1170,29 @@ async function finishTask(t, rec, onDone){
     const nextAbs=nextRecurDate(rec, base), iso=isoOfAbs(nextAbs);
     const oldDue=t.due_date;
     const body=Object.assign({ due_date:iso, archived:false }, rec);
-    try{ await api('/api/tasks/'+t.id,{method:'PATCH',body:JSON.stringify(body)}); if(onDone) onDone(); await reload();
-      showToast('Задача перенесена на '+fmtRuDate(nextAbs));
+    const live=liveTask(t), was={ due_date:live.due_date, recurrence_type:live.recurrence_type,
+      recurrence_days:live.recurrence_days, recurrence_day_of_month:live.recurrence_day_of_month,
+      recurrence_date:live.recurrence_date };
+    if(onDone) onDone();
+    Object.assign(live, body); if(live!==t) Object.assign(t, body); paintLocal();
+    const bye=showToast('Задача перенесена на '+fmtRuDate(nextAbs));
+    try{ await api('/api/tasks/'+t.id,{method:'PATCH',body:JSON.stringify(body)});
       pushUndo(async()=>{ await api('/api/tasks/'+t.id,{method:'PATCH',body:JSON.stringify({due_date:oldDue||null})}); await reload(); },
                async()=>{ await api('/api/tasks/'+t.id,{method:'PATCH',body:JSON.stringify(body)}); await reload(); }); }
-    catch(e){ showToast('Ошибка: '+e.message); }
+    catch(e){ bye(); Object.assign(live, was); if(live!==t) Object.assign(t, was); paintLocal(); showToast('Ошибка: '+e.message); }
     return;
   }
   const prev={archived:!!t.archived};
   const doDone=async()=>{ await api('/api/tasks/'+t.id,{method:'PATCH',body:JSON.stringify({archived:true, completed_at:new Date().toISOString()})}); };
-  try{ await doDone(); if(onDone) onDone(); await reload();
-    showToast('Задача завершена — она в архиве');
+  if(onDone) onDone();
+  const gone=dropLocal(t.id);
+  // сообщение показываем сразу, но держим ниточку: не вышло — уберём его, чтобы рядом с ошибкой
+  // не висело бодрое «завершена»
+  const bye=showToast('Задача завершена — она в архиве');
+  try{ await doDone();
     pushUndo(async()=>{ await api('/api/tasks/'+t.id,{method:'PATCH',body:JSON.stringify({archived:prev.archived})}); await reload(); },
              async()=>{ await doDone(); await reload(); }); }
-  catch(e){ showToast('Ошибка: '+e.message); }
+  catch(e){ bye(); restoreLocal(gone); showToast('Ошибка: '+e.message); }
 }
 async function delTask(t){ if(!await uiConfirm(delTaskMsg(t))) return; try{ await api('/api/tasks/'+t.id,{method:'DELETE'}); await reload(); pushDeleteUndo(t.id); showToast('Задача в корзине'); }catch(e){ showToast('Ошибка: '+e.message); } }
 function pushDeleteUndo(taskId){   // отмена удаления = вернуть из корзины
@@ -3758,7 +3778,9 @@ async function reload(){
   liveSig = sigFrom(allTasks);   // базовая «подпись» данных для живого обновления
   if(isMobileView()) renderMobile();       // мобильная версия — обновить список дня
   try{ refreshView(); }catch(e){}          // открыт список меню (мои задачи и т.п.) — перерисовать и его
-  rolloverOverdue();   // при каждом заходе/обновлении переносим просроченные на сегодня (guard внутри против рекурсии)
+  // ⚠️ Перенос просроченных отсюда УБРАН: это работа «при входе и при смене суток» (её зовут start()
+  //    и часовой сторож ниже), а не при каждом обновлении данных. Пока он жил здесь, любое действие —
+  //    завершение, перенос задачи мышкой — тянуло за собой лишний запрос к серверу.
 }
 // ---------- живое обновление: тихий опрос чужих изменений (без перезахода) ----------
 function sigFrom(taskArr){ return JSON.stringify(
