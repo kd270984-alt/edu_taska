@@ -194,11 +194,24 @@ async function main(): Promise<void> {
   // Связь с Таской проверяем СРАЗУ, а не при первом сообщении. Иначе в журнале стоит бодрое
   // «слушает сообщения», а человек в Телеграме получает «Таска сейчас не отвечает» — и ищи причину.
   // Заодно проверяется пароль учётки агента: api() перед запросом входит в Таску.
-  try {
-    await api('/api/health');
-    console.log(`Таска отвечает (${API}) — бот готов`);
-  } catch (e) {
-    console.error(`НЕТ СВЯЗИ С ТАСКОЙ (${API}): ${(e as Error).message}`);
+  // ⚠️ Но с терпением: бот и api стартуют вместе, а api сперва ставит зависимости и открывает базу —
+  //    первые полминуты-минуту Таски просто ещё нет. Раньше бот в этот момент писал «НЕТ СВЯЗИ»,
+  //    и новичок решал, что всё сломано. Теперь ждём до двух минут; неверный пароль агента
+  //    ожиданием не лечится — о нём говорим сразу.
+  let ready = false, why = '';
+  for (let i = 0; i < 24 && !ready; i++) {
+    try { await api('/api/health'); ready = true; }
+    catch (e) {
+      why = (e as Error).message;
+      // ждём, пока Таска недоступна по сети или отвечает 5xx; «неверный пароль» ожиданием не лечится
+      if (!/fetch failed|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ECONNRESET|socket|timeout|: 5\d\d$|не отвечает/i.test(why)) break;
+      if (i === 0) console.log(`жду Таску (${API}) — она ещё запускается…`);
+      await new Promise((r) => setTimeout(r, 5_000));
+    }
+  }
+  if (ready) console.log(`Таска отвечает (${API}) — бот готов`);
+  else {
+    console.error(`НЕТ СВЯЗИ С ТАСКОЙ (${API}): ${why}`);
     console.error('Проверьте TASKA_URL в docker-compose.yml и AGENT_EMAIL/AGENT_PASSWORD в .env.');
   }
 
