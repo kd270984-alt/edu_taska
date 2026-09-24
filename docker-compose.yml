@@ -24,8 +24,10 @@ services:
 
   minio:
     logging: *logs
-    # Docker Hub отдаёт minio/minio только авторизованным — берём официальное зеркало на quay.io.
-    image: quay.io/minio/minio:latest
+    # ⚠️ Официальных образов MinIO больше нет: в 2025-м MinIO перестал их выкладывать, а 24.09.2026
+    # закрыл и quay.io (401), и Docker Hub. pgsty/minio — тот же MinIO, собранный командой Pigsty:
+    # та же команда запуска, те же настройки MINIO_ROOT_*, есть сборки amd64 и arm64.
+    image: pgsty/minio:latest
     restart: always
     command: server /data --console-address ":9001"
     environment:
