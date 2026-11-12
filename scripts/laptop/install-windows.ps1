@@ -119,6 +119,33 @@ Say 'сервер на связи, ночные копии на нём есть'
 try { $free = (New-Object IO.DriveInfo ([IO.Path]::GetPathRoot($env:USERPROFILE))).AvailableFreeSpace } catch { $free = 2GB }
 if ($free -lt 1GB) { Stop-Install 'на этом компьютере свободно меньше 1 ГБ — освободите место и повторите.' }
 
+# Идущий запуск копии (проверка на Windows 12.11.2026): Планировщик останавливает только conhost --headless, а
+# powershell с taska-backup.ps1 и его ssh/scp/sftp продолжают работать. Находим их по записи блокировки и по
+# командной строке (только наши скрипты из этой папки) и гасим вместе с дочерними процессами.
+function Stop-Running([string]$AppDir, [string]$DestDir) {
+  $ids = New-Object System.Collections.Generic.List[int]
+  try {
+    $first = (([IO.File]::ReadAllText((Join-Path $DestDir '.state\lock\info'))).Trim() -split ' ')[0]
+    if ($first -match '^\d+$') { $ids.Add([int]$first) }
+  } catch {}
+  $procs = @()
+  try { $procs = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction Stop) } catch {}
+  $app = $AppDir.TrimEnd('\').ToLowerInvariant()
+  foreach ($p in $procs) {
+    $cl = [string]$p.CommandLine
+    if ($p.ProcessId -ne $PID -and $cl -and $cl.ToLowerInvariant().Contains($app) -and $cl -match 'taska-backup\.ps1|test-run\.ps1') { $ids.Add([int]$p.ProcessId) }
+  }
+  $killed = 0
+  foreach ($id in ($ids | Select-Object -Unique)) {
+    if ($id -eq $PID) { continue }
+    $p = $procs | Where-Object { $_.ProcessId -eq $id } | Select-Object -First 1
+    if (-not $p -or [string]$p.CommandLine -notmatch 'taska-backup\.ps1|test-run\.ps1') { continue }   # PID из блокировки мог достаться чужому процессу
+    & "$env:WINDIR\System32\taskkill.exe" /PID $id /T /F 2>&1 | Out-Null; $killed++
+  }
+  if ($killed) { Start-Sleep -Milliseconds 700 }
+  return $killed
+}
+
 # ---------- скрипты с сервера (во временную папку: короткие латинские имена, русский путь — только рабочей папкой) ----------
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("taska-install-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
@@ -127,9 +154,10 @@ if ($r.Code -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $tmp 'laptop\taska
   Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
   Stop-Install "не скачались скрипты с сервера. $(($r.Err -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1))"
 }
-# старая задача — остановить ДО первой копии, чтобы не было двух запусков сразу
+# старая задача — остановить ДО первой копии, чтобы не было двух запусков сразу; идущий запуск — тоже
 $old = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($old) { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue; Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Out-Null }
+if ((Stop-Running $App $Dest) -gt 0) { Say 'остановил идущую копию старой версии — она продолжится уже новой' }
 try {
   New-Item -ItemType Directory -Force -Path $App, (Join-Path $Dest '.state') -ErrorAction Stop | Out-Null
   Copy-Item -Path (Join-Path $tmp 'laptop\*') -Destination $App -Force -ErrorAction Stop
@@ -156,7 +184,11 @@ function X([string]$s) { return [Security.SecurityElement]::Escape($s) }
 $start = (Get-Date).Date.AddHours((Get-Date).Hour + 1).ToString("yyyy-MM-dd'T'HH:mm:ss")   # ближайший БУДУЩИЙ час
 $psArgs = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Script`""
 $conhost = Join-Path $env:WINDIR 'System32\conhost.exe'
-if ($Window -eq 'hidden' -and (Test-Path -LiteralPath $conhost)) {
+# установщик запущен из 32-битного PowerShell: System32 для него подменяется на SysWOW64, где conhost нет, —
+# проверяем настоящую System32 через Sysnative, а в задачу пишем обычный путь (проверка на Windows 12.11.2026)
+$probe = if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) { Join-Path $env:WINDIR 'Sysnative\conhost.exe' } else { $conhost }
+if ($Window -eq 'hidden' -and -not (Test-Path -LiteralPath $probe)) { Say 'скрытый запуск недоступен на этой Windows — копия будет идти в свёрнутом окне' }
+if ($Window -eq 'hidden' -and (Test-Path -LiteralPath $probe)) {
   # Windows 11: терминал по умолчанию — Windows Terminal, и -WindowStyle Hidden его не прячет;
   # conhost --headless запускает PowerShell вовсе без окна.
   $cmd = $conhost; $cmdArgs = "--headless `"$Ps`" $psArgs"
@@ -230,7 +262,7 @@ if (-not $ok -and ([DateTimeOffset]::Now.ToUnixTimeSeconds() - $T1) -lt 55) {
   [Console]::Out.WriteLine("ПОСТАВЛЕНО, НО НЕ ПРОВЕРЕНО: задача $TaskName в Планировщике стоит, а проверить её первый запуск не хватило времени (медленная связь). Ничего не чините: через 5 минут откройте $Dest\Последняя копия.txt — там должна быть свежая «Последняя проверка».")
   exit 4
 }
-if (-not $ok) { Stop-Install "задача поставлена, но её запуск не прошёл за минуту. Откройте Планировщик заданий → задача $TaskName → вкладка «Журнал» и покажите помощнику последнюю ошибку." }
+if (-not $ok) { Stop-Install "задача поставлена, но её запуск не прошёл за минуту. Откройте $Dest\журнал.txt и «Последняя копия.txt» в той же папке и покажите помощнику последние строки." }
 Say 'задача в Планировщике стоит и сработала: каждый час, при входе в Windows и сразу после сна'
 
 # ---------- итог ----------

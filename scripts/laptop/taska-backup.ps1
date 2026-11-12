@@ -85,6 +85,13 @@ function Log([string]$m) {
   # прямо в консоль, а не Write-Output: иначе строка журнала попала бы в результат функции
   if ($Now) { [Console]::Out.WriteLine($m) }
 }
+# «1 файл», «2 файла», «5 файлов»
+function Files-Word([long]$n) {
+  $m10 = $n % 10; $m100 = $n % 100
+  if ($m10 -eq 1 -and $m100 -ne 11) { return 'файл' }
+  if ($m10 -ge 2 -and $m10 -le 4 -and ($m100 -lt 12 -or $m100 -gt 14)) { return 'файла' }
+  return 'файлов'
+}
 function HSize([double]$b) {
   if ($b -lt 1048576) { return ('{0} КБ' -f [math]::Floor(($b + 1023) / 1024)) }
   if ($b -lt 1073741824) { return (('{0:0.0} МБ' -f ($b / 1048576)) -replace '\.', ',') }
@@ -456,7 +463,7 @@ function Files-Step {
   }
   if ($missing -gt 0) { Log "файлы задач: $missing не скачались (их, видимо, только что удалили) — проверю в следующий раз" }
   Set-State 'files_day' $Today; Set-State 'files_ok' $NowS
-  Log "файлы задач сверены: $($have.Count) файлов, новых $($gotList.Count)"
+  Log "файлы задач сверены: $($have.Count) $(Files-Word $have.Count), новых $($gotList.Count)"
 }
 
 # ---------- запуск ----------
@@ -473,7 +480,11 @@ if (-not $Now) {
 } else { Log "запуск вручную (версия $Version)" }
 
 Db-Step
-if (-not $Now -and $script:Contact -and (Read-Line 'files_day') -ne $Today) { Files-Step }
+if (-not $Now -and $script:Contact -and (Read-Line 'files_day') -ne $Today) {
+  Files-Step
+  # причина сбоя файлов — и в журнал, не только в «Последняя копия.txt» (её каждый запуск переписывает); обрыв докачки уже записан
+  if ($script:FPMsg -and $script:FPMsg -notmatch '^докачка') { Log "файлы задач: $($script:FPMsg)" }
+}
 
 # храним Keep самых свежих копий базы
 $c = @(Copies)
@@ -514,7 +525,7 @@ else { [void]$st.AppendLine('Копий базы пока нет.') }
 $fok = Read-Num 'files_ok'
 if ($fok) {
   $hv = Read-Tsv (Join-Path $StateDir 'files.have'); [double]$fb = 0; foreach ($v in $hv.Values) { $fb += [double](($v -split "`t")[0]) }
-  [void]$st.AppendLine("Файлы задач: $($hv.Count) файлов ($(HSize $fb)), сверены с сервером $((FromUnix $fok).ToString('dd.MM.yyyy HH:mm')).")
+  [void]$st.AppendLine("Файлы задач: $($hv.Count) $(Files-Word $hv.Count) ($(HSize $fb)), сверены с сервером $((FromUnix $fok).ToString('dd.MM.yyyy HH:mm')).")
 } else { [void]$st.AppendLine('Файлы задач: ещё не копировались.') }
 if ($script:FPMsg) { [void]$st.AppendLine("Файлы задач сейчас: $($script:FPMsg)") }
 if ($script:Problem) { [void]$st.AppendLine("Последняя проверка: $($NowT.ToString('dd.MM.yyyy HH:mm')) — не вышло (см. первую строку).") }
@@ -545,7 +556,7 @@ if (-not $Now) {
   $from = (FromUnix $since).ToString('dd.MM')
   switch ($script:Problem) {
     '' {}
-    'server' { $reason = $script:PMsg }                                       # сам не пройдёт — сразу
+    'server' { $reason = $script:PMsg; if ($reason) { $reason = $reason.Substring(0, 1).ToUpper() + $reason.Substring(1) } }   # сам не пройдёт — сразу; с заглавной, как остальные окна
     { $_ -in @('key', 'hostkey', 'nohost', 'nossh') } { if ($quiet -ge 86400) { $reason = "Копии нет с ${from}: $($script:PMsg)" } }
     'net' { if ($quiet -ge 259200) { $reason = "Копии нет с ${from}: сервер не отвечает. Откройте свою Таску в браузере. Не открывается — сервер выключен или не оплачен: зайдите в кабинет hoster.kz. Открывается — рабочий Wi-Fi иногда закрывает вход на серверы: попробуйте другую сеть, а если не поможет, скажите помощнику «проверь копию Таски на этом компьютере по README»." } }
     default { if ($quiet -ge 259200) { $reason = "Копии нет с ${from}: $($script:PMsg)" } }   # прочее: 3 дня
