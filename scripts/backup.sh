@@ -11,7 +11,11 @@
 #    в тот день, когда она понадобилась. Скрипт проверяет каждый архив и пишет админу.
 #    Нет бота или никто не привязан — просто делает копию молча.
 #
-# Хранение: BACKUP_KEEP_DAYS дней (по умолчанию 30). Вложения из MinIO сюда НЕ входят.
+# Хранение: BACKUP_KEEP_DAYS дней (по умолчанию 30). Вложения из MinIO сюда НЕ входят
+# (их забирает ноутбук прямо из хранилища — см. README «Копия на ноутбук»).
+#
+# ⚠️ Пишем во временный .part и переименовываем только проверенный архив. Раньше файл с сегодняшней
+#    датой появлялся сразу и при сбое оставался битым — ноутбук мог забрать его как «самый свежий».
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [ -f .env ] || { echo "нет файла .env — запускать из папки проекта" >&2; exit 1; }
@@ -23,6 +27,9 @@ TOKEN=$(val TELEGRAM_BOT_TOKEN)
 KEEP=$(val BACKUP_KEEP_DAYS); KEEP="${KEEP:-30}"
 DIR=backups; mkdir -p "$DIR"
 FILE="$DIR/$(date +%F).sql.gz"
+PART="$FILE.part"
+rm -f "$DIR"/*.part                 # остатки прошлых оборванных запусков
+trap 'rm -f "$PART"' EXIT           # при любом исходе недописанный файл не остаётся
 
 # отчёт админу: ищем тех, у кого админская роль И привязан Телеграм
 tg(){
@@ -38,13 +45,35 @@ tg(){
 }
 beda(){ echo "копия НЕ сделана: $1" >&2; tg "⚠️ Копия базы Таски НЕ сделана: $1"; exit 1; }
 
-docker compose exec -T postgres pg_dump -U "$PGU" "$PGD" | gzip > "$FILE" || beda "pg_dump не отработал"
-gzip -t "$FILE" 2>/dev/null || beda "архив битый ($FILE)"
+docker compose exec -T postgres pg_dump -U "$PGU" "$PGD" | gzip > "$PART" || beda "pg_dump не отработал"
+gzip -t "$PART" 2>/dev/null || beda "архив битый ($FILE)"
 # шапка дампа — во второй строке, а не в первой; head обрывает gzip, поэтому терпим его код выхода
-HEAD=$({ gzip -dc "$FILE" 2>/dev/null | head -5; } || true)
+HEAD=$({ gzip -dc "$PART" 2>/dev/null | head -5; } || true)
 echo "$HEAD" | grep -q "PostgreSQL database dump" || beda "внутри архива не дамп базы ($FILE)"
+mv -f "$PART" "$FILE"
 
-find "$DIR" -name '*.sql.gz' -mtime "+$KEEP" -delete
-SIZE=$(du -h "$FILE" | cut -f1); N=$(ls -1 "$DIR"/*.sql.gz 2>/dev/null | wc -l | tr -d ' ')
-echo "$(date +%F' '%T) копия готова: $FILE ($SIZE), всего копий: $N"
-tg "✅ Копия базы Таски за $(date +%d.%m) готова: $SIZE. Всего копий: $N, храню $KEEP дней."
+find "$DIR" -name '[0-9]*.sql.gz' -mtime "+$KEEP" -delete   # before-restore-* не трогаем
+SIZE=$(du -h "$FILE" | cut -f1); N=$(ls -1 "$DIR"/[0-9]*.sql.gz 2>/dev/null | wc -l | tr -d ' ')
+
+# Копия на ноутбук: ноутбук ставит две отметки — backups/.laptop-ok (забрал базу) и
+# backups/.laptop-files-ok (сверил файлы задач). Сигнал о том, что ноутбук перестал забирать копию,
+# даёт СЕРВЕР: окно на ноутбуке не появится, если ноутбук сломан, потерян или его задачу выключили.
+# Файлы — отдельной строкой (замечание критика 12.11.2026): база может приходить, а файлы — нет
+# (мало места на ноутбуке, обрыв докачки). Отметок нет — копия на ноутбук не настроена, тогда молчим.
+age_days(){ local t; t=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"); echo $(( ( $(date +%s) - t ) / 86400 )); }
+days_word(){ case "$(($1 % 100))" in 11|12|13|14) echo "дней" ;; *) case "$(($1 % 10))" in 1) echo "день" ;; 2|3|4) echo "дня" ;; *) echo "дней" ;; esac ;; esac; }
+LAPTOP=""
+if [ -f "$DIR/.laptop-ok" ]; then
+  DAYS=$(age_days "$DIR/.laptop-ok")
+  if [ "$DAYS" -ge 2 ]; then
+    LAPTOP="ноутбук не забирал копию $DAYS $(days_word "$DAYS")"
+  elif [ -f "$DIR/.laptop-files-ok" ]; then
+    FDAYS=$(age_days "$DIR/.laptop-files-ok")
+    [ "$FDAYS" -ge 3 ] && LAPTOP="ноутбук берёт базу, а файлы задач не забирал $FDAYS $(days_word "$FDAYS")"
+  fi
+fi
+
+echo "$(date +%F' '%T) копия готова: $FILE ($SIZE), всего копий: $N${LAPTOP:+; ⚠️ $LAPTOP}"
+tg "✅ Копия базы Таски за $(date +%d.%m) готова: $SIZE. Всего копий: $N, храню $KEEP дней.${LAPTOP:+
+
+⚠️ Но $LAPTOP. Скажите помощнику на ноутбуке: «проверь копию Таски на этом компьютере по README».}"
