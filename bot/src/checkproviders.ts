@@ -4,7 +4,11 @@
 //
 // Что проверяем: задача из текста по каждой нейросети (с вызовом инструмента), голос с ключом OpenAI
 // и без него, ошибки ключа (401 / нет денег / страна / ключа нет), второй экземпляр бота (409),
-// неверный токен, строки BOT_STATUS для портала и что ключи не попадают в журнал.
+// неверный токен, строки BOT_STATUS для портала и что ключи не попадают в журнал. С 12.11.2026 ещё:
+// «лимит запросов» не путается с «нет денег», ключ OpenAI для голоса при Claude/Kimi, вебхук вместо
+// второго экземпляра, опрос Телеграма не ждёт Таску, долгий ход не доделывается в фоне.
+// ⚠️ «Второй экземпляр» здесь упрощён: поддельный Телеграм всегда отвечает 409. Настоящую гонку двух ботов
+//    (кто опросил позже, тот и выиграл) так не воспроизвести.
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
@@ -26,6 +30,8 @@ interface World {
   delivered: number;
   tasks: any[];                     // что бот создал в Таске
   llm: Record<string, any[]>;       // запросы к нейросетям
+  unhooked?: boolean;               // бот выключил вебхук
+  taskaFrom?: number;               // до этого момента Таска «ещё запускается» (503)
 }
 let W: World = { token: "", inbox: [], sent: [], delivered: 0, tasks: [], llm: { openai: [], anthropic: [], moonshot: [] } };
 const fresh = (token: string, inbox: any[]): World => ({ token, inbox, sent: [], delivered: 0, tasks: [], llm: { openai: [], anthropic: [], moonshot: [] } });
@@ -48,6 +54,7 @@ async function telegram(method: string, token: string, body: any, res: http.Serv
   if (token === 'BAD') return json(res, 401, { ok: false, error_code: 401, description: 'Unauthorized' });
   if (method === 'getMe') return json(res, 200, { ok: true, result: { id: 1, is_bot: true, username: 'check_bot' } });
   if (method === 'getUpdates') {
+    if (token === 'HOOK' && !W.unhooked) return json(res, 409, { ok: false, error_code: 409, description: "Conflict: can't use getUpdates method while webhook is active; use deleteWebhook to delete the webhook first" });
     if (token === 'TWIN') return json(res, 409, { ok: false, error_code: 409, description: 'Conflict: terminated by other getUpdates request' });
     // следующее сообщение — только когда на предыдущее уже ответили: так проверяем и второй ход разговора
     if (W.delivered < W.inbox.length && W.sent.length >= W.delivered) {
@@ -58,6 +65,7 @@ async function telegram(method: string, token: string, body: any, res: http.Serv
     return json(res, 200, { ok: true, result: [] });
   }
   if (method === 'sendMessage') { W.sent.push(String(body.text)); return json(res, 200, { ok: true, result: {} }); }
+  if (method === 'deleteWebhook') { W.unhooked = true; return json(res, 200, { ok: true, result: true }); }
   if (method === 'sendChatAction') return json(res, 200, { ok: true, result: true });
   if (method === 'getFile') return json(res, 200, { ok: true, result: { file_id: body.file_id, file_size: 1000, file_path: 'voice/file_1.oga' } });
   return json(res, 404, { ok: false, error_code: 404, description: 'Not Found' });
@@ -65,7 +73,7 @@ async function telegram(method: string, token: string, body: any, res: http.Serv
 
 function taska(path: string, method: string, body: any, res: http.ServerResponse): void {
   if (path === '/api/auth/login') return json(res, 200, { token: 'agent-token' });
-  if (path === '/api/health') return json(res, 200, { ok: true });
+  if (path === '/api/health') return W.taskaFrom && Date.now() < W.taskaFrom ? json(res, 503, { error: 'starting' }) : json(res, 200, { ok: true });
   if (path.startsWith('/api/agent/resolve')) return json(res, 200, { linked: true, user: { id: 'u1', name: 'Аня' } });
   if (path === '/api/tags') return json(res, 200, { tags: [] });
   if (path.startsWith('/api/tasks') && method === 'GET') return json(res, 200, { tasks: W.tasks });
@@ -83,6 +91,11 @@ const toolArgs = { name: 'Позвонить клиенту', due_date: tomorrow
 function openai(path: string, key: string, body: any, res: http.ServerResponse): void {
   if (key === 'sk-test-401') return json(res, 401, { error: { message: `Incorrect API key provided: ${key}.`, type: 'invalid_request_error', code: 'invalid_api_key' } });
   if (key === 'sk-test-quota') return json(res, 429, { error: { message: 'You exceeded your current quota, please check your plan and billing details.', type: 'insufficient_quota', code: 'insufficient_quota' } });
+  // «лимит запросов» со ссылкой на billing в тексте — это НЕ «нет денег»
+  if (key === 'sk-test-rate') return json(res, 429, { error: { message: 'Rate limit reached for gpt-5 in organization org-x on requests per min (RPM): Limit 3. Add a payment method to your account to increase your rate limit. Visit https://platform.openai.com/account/billing to add a payment method.', type: 'requests', code: 'rate_limit_exceeded' } });
+  if (path === '/models') return json(res, 200, { object: 'list', data: [{ id: 'gpt-4o-transcribe', object: 'model', created: 1, owned_by: 'openai' }] });
+  // список моделей отдаётся и при пустом счёте — деньги кончаются только на распознавании
+  if (key === 'sk-test-voicequota') return json(res, 429, { error: { message: 'You exceeded your current quota, please check your plan and billing details.', type: 'insufficient_quota', code: 'insufficient_quota' } });
   if (path === '/audio/transcriptions') return json(res, 200, { text: 'добавь задачу позвонить клиенту на завтра в 11' });
   if (path !== '/responses') return json(res, 404, { error: { message: 'not found' } });
   W.llm.openai.push(body);
@@ -100,7 +113,7 @@ function openai(path: string, key: string, body: any, res: http.ServerResponse):
 }
 
 // Claude: Messages API. В ответах — блоки «размышлений» с подписью: бот не должен нести их в следующий ход.
-function anthropic(path: string, key: string, body: any, res: http.ServerResponse): void {
+async function anthropic(path: string, key: string, body: any, res: http.ServerResponse): Promise<void> {
   if (key === 'ak-test-401') return json(res, 401, { type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } });
   if (key === 'ak-test-402') return json(res, 402, { type: 'error', error: { type: 'billing_error', message: 'Your credit balance is too low to access the Anthropic API.' } });
   if (path !== '/v1/messages') return json(res, 404, { type: 'error', error: { type: 'not_found_error', message: 'not found' } });
@@ -111,6 +124,13 @@ function anthropic(path: string, key: string, body: any, res: http.ServerRespons
   const last = msgs[msgs.length - 1];
   const think = { type: 'thinking', thinking: 'обдумываю', signature: 'sig-' + W.llm.anthropic.length };
   if (Array.isArray(last?.content) && last.content.some((b: any) => b?.type === 'tool_result')) {
+    // «медленный» ключ: после вызова инструмента задумывается дольше, чем бот ждёт ход
+    // и потом снова зовёт create_task: если бы бот доделывал ход в фоне, появилась бы лишняя задача
+    if (key === 'ak-test-slow') {
+      await sleep(4000);
+      if (res.destroyed || res.writableEnded) return;
+      return json(res, 200, { ...base, content: [{ type: 'tool_use', id: 'toolu_late' + W.llm.anthropic.length, name: 'create_task', input: { ...toolArgs, name: 'Лишняя задача из фона' } }], stop_reason: 'tool_use' });
+    }
     return json(res, 200, { ...base, content: [think, { type: 'text', text: `Создал задачу «Позвонить клиенту» на ${tomorrow}.` }], stop_reason: 'end_turn' });
   }
   json(res, 200, { ...base, content: [think, { type: 'tool_use', id: 'toolu_' + W.llm.anthropic.length, name: 'create_task', input: toolArgs }], stop_reason: 'tool_use' });
@@ -133,7 +153,8 @@ function moonshot(path: string, key: string, body: any, res: http.ServerResponse
 
 const server = http.createServer(async (req, res) => {
   const url = req.url || '';
-  const raw = await readBody(req);
+  let raw = '';
+  try { raw = await readBody(req); } catch { return; }   // бот оборвал запрос (таймаут хода) — это нормально
   let body: any = {};
   if ((req.headers['content-type'] || '').includes('json')) { try { body = JSON.parse(raw || '{}'); } catch { body = {}; } }
   const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -273,12 +294,54 @@ console.log('\nОшибки ключа:');
   check('старая строка AGENT_MODEL=gpt-5 при Claude не мешает', has(r, 'BOT_STATUS model=ok provider=anthropic model=claude-sonnet-5-5'), r.status.join(' | '));
 }
 
+// 4б) Замечания критика 12.11.2026
+console.log('\nЛимит, голос, Kimi, долгий ход:');
+{
+  let r = await runBot({ OPENAI_API_KEY: 'sk-test-rate' }, fresh('T12', [text(ask)]), answered(1));
+  check('OpenAI 429 «лимит запросов» со ссылкой на billing → НЕ no_money', has(r, 'BOT_STATUS model=fail provider=openai code=other'), r.status.join(' | '));
+  check('человеку: «лимит запросов», а не «закончились деньги»', /лимит запросов/.test(W.sent[0] || '') && !/деньги/.test(W.sent[0] || ''), W.sent[0]);
+
+  r = await runBot({ AI_PROVIDER: 'anthropic', ANTHROPIC_API_KEY: 'ak-test-good', OPENAI_API_KEY: 'sk-test-401' }, fresh('T13', [voice]), answered(1));
+  check('Claude + неверный ключ OpenAI → voice=off', has(r, 'BOT_STATUS voice=off') && !has(r, 'BOT_STATUS voice=on'), r.status.join(' | '));
+  check('на голосовое — по-русски: ключ OpenAI не подошёл', /OpenAI, а она не принимает ключ/.test(W.sent[0] || '') && !/Incorrect/.test(W.sent[0] || ''), W.sent[0]);
+  check('причина выключения голоса — в журнале, ключа там нет', /голосовые выключены: ключ OpenAI/.test(r.out) && noSecrets(r, 'sk-test-401'));
+
+  r = await runBot({ AI_PROVIDER: 'moonshot', MOONSHOT_API_KEY: 'mk-test-good', OPENAI_API_KEY: 'sk-test-voicequota' }, fresh('T14', [voice]), answered(1));
+  check('Kimi + ключ OpenAI без денег: при запуске voice=on (список моделей отдаётся)', has(r, 'BOT_STATUS voice=on'), r.status.join(' | '));
+  check('на голосовое — «у OpenAI закончились деньги», без английского', /закончились деньги/.test(W.sent[0] || '') && !/quota/i.test(W.sent[0] || ''), W.sent[0]);
+  check('ошибка голоса записана в журнал', /распознавание голоса: голосовые \(OpenAI\): no_money/.test(r.out));
+  const ping = W.llm.moonshot.find((b) => b.messages.length === 1);
+  check('проверка Kimi при запуске — без поля предела длины', !!ping && !('max_completion_tokens' in ping) && !('max_tokens' in ping), JSON.stringify(ping));
+
+  // Таска запускается 6 с: опрос Телеграма идёт сразу, а сообщение ждёт Таску и не теряется
+  const w = fresh('T15', [text(ask)]); w.taskaFrom = Date.now() + 6000;
+  r = await runBot({ OPENAI_API_KEY: 'sk-test-good' }, w, answered(1));
+  const iPoll = r.out.indexOf('BOT_STATUS poll=ok'), iTaska = r.out.indexOf('Таска отвечает');
+  check('poll=ok раньше, чем Таска поднялась', iPoll >= 0 && iTaska > iPoll, `poll@${iPoll} taska@${iTaska}`);
+  check('сообщение, пришедшее до Таски, выполнено после её запуска', /Создал задачу/.test(W.sent[0] || '') && W.tasks.length === 1, W.sent[0]);
+
+  // Долгий ход (ждём 2 с, модель думает 4 с): после «долго не могу» ход в фоне не доделывается
+  let at = 0;
+  r = await runBot({ AI_PROVIDER: 'anthropic', ANTHROPIC_API_KEY: 'ak-test-slow', AGENT_TURN_TIMEOUT_S: '2' },
+    fresh('T16', [text(ask), text('и ещё одну')]),
+    (w2) => { if (w2.sent.length >= 2 && !at) at = Date.now(); return !!at && Date.now() - at > 5000; }, 30_000);
+  check('человеку: «долго», но что успел — сказано', /Долго не могу/.test(W.sent[0] || '') && /успел: создал задачу «Позвонить клиенту»/.test(W.sent[0] || ''), W.sent[0]);
+  const turns = W.llm.anthropic.filter((b) => !(b.messages.length === 1 && b.messages[0].content === 'ping'));
+  const second = turns.find((b, i) => i > 0 && b.messages.at(-1)?.role === 'user' && typeof b.messages.at(-1)?.content === 'string');
+  check('недоделанный ход не попал в историю следующего', !!second && second.messages.length === 1, JSON.stringify(second?.messages)?.slice(0, 200));
+  check('после таймаута задачи в фоне не появляются (2 хода — 2 задачи)', W.tasks.length === 2, String(W.tasks.length));
+}
+
 // 5) Телеграм: второй экземпляр и неверный токен
 console.log('\nТелеграм:');
 {
   let r = await runBot({ OPENAI_API_KEY: 'sk-test-good' }, fresh('TWIN', []), (_w, o) => o.includes('poll=fail'));
   check('409 → poll=fail code=twin', has(r, 'BOT_STATUS poll=fail code=twin'), r.status.join(' | '));
   check('poll=ok при этом не написан', !r.status.some((s) => s.includes('poll=ok')));
+
+  r = await runBot({ OPENAI_API_KEY: 'sk-test-good' }, fresh('HOOK', []), (_w, o) => o.includes('poll=ok'));
+  check('409 из-за вебхука → бот выключил вебхук и работает (poll=ok)', W.unhooked === true && has(r, 'BOT_STATUS poll=ok'), r.status.join(' | '));
+  check('вебхук — не «второй экземпляр»: poll=fail code=twin не написан', !has(r, 'BOT_STATUS poll=fail code=twin'));
 
   r = await runBot({ OPENAI_API_KEY: 'sk-test-good' }, fresh('BAD', []), () => false, 15_000);
   check('неверный токен → telegram=fail code=bad_token', has(r, 'BOT_STATUS telegram=fail code=bad_token'), r.status.join(' | '));

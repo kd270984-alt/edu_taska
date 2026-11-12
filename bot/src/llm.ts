@@ -74,7 +74,10 @@ const KIMI_EFFORT = /^kimi-k3/i.test(MODEL);
 // Голос → текст. Только ключом OpenAI (у Claude и Kimi распознавания речи нет).
 export const VOICE_SWITCH = (process.env.AGENT_VOICE || 'on') !== 'off';
 export const VOICE_KEY = !!String(process.env.OPENAI_API_KEY || '').trim();
-export const VOICE_READY = VOICE_SWITCH && VOICE_KEY;
+// let, а не const: при запуске голос выключается, если ключ OpenAI не подошёл (checkVoice).
+// Импорт видит новое значение — так устроены модули.
+export let VOICE_READY = VOICE_SWITCH && VOICE_KEY;
+export let VOICE_WHY = '';          // почему голос выключен при наличии ключа — для ответа человеку
 
 // Адрес Kimi. MOONSHOT_BASE_URL — только для проверок с поддельным сервером (и для площадки .cn).
 const MOONSHOT_URL = (process.env.MOONSHOT_BASE_URL || 'https://api.moonshot.ai/v1').replace(/\/+$/, '');
@@ -97,8 +100,12 @@ export function errKind(e: unknown): ErrKind {
     return /fetch failed|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ECONNRESET|socket|timed? ?out/i.test(words) ? 'down' : 'other';
   }
   // нет денег: OpenAI — 429 insufficient_quota, Anthropic — 402 или 400 «credit balance is too low»,
-  // Kimi — 429 exceeded_current_quota_error. Проверяем раньше 429: иначе это выглядело бы как «лимит запросов»
-  if (status === 402 || /insufficient_quota|exceeded_current_quota|billing|credit balance|balance is insufficient|quota is insufficient/i.test(words)) return 'no_money';
+  // Kimi — 429 exceeded_current_quota_error. Проверяем раньше 429: иначе это выглядело бы как «лимит запросов».
+  // ⚠️ У 429 смотрим только на код/тип ошибки, не на слова: обычный «лимит запросов» OpenAI у новых
+  //    аккаунтов содержит ссылку …/account/billing — и человек зря шёл бы пополнять счёт (замечание критика 12.11.2026).
+  const codes = [x?.code, x?.type, inner?.type, inner?.code].filter(Boolean).join(' ');
+  if (status === 402 || /insufficient_quota|exceeded_current_quota|billing_error/i.test(codes)) return 'no_money';
+  if (status === 400 && /credit balance|billing|balance is insufficient|quota is insufficient/i.test(words)) return 'no_money';
   if (status === 401) return 'bad_key';
   if (status === 403) return /country|region|territor|location|not allowed|not supported/i.test(words) ? 'region' : 'other';
   if (status === 404) return 'model';
@@ -152,7 +159,10 @@ export async function checkModel(): Promise<CheckResult> {
       });
     } else if (PROVIDER === 'moonshot') {
       await moonshotClient(30_000, 0).chat.completions.create({
-        model: MODEL, messages: [{ role: 'user', content: 'ping' }], max_completion_tokens: 32,
+        // Без предела длины: проверить его название у настоящего Kimi не удалось, а лишнее поле дало бы 400 —
+        // и у всех учеников с Kimi портал показывал бы ошибку при работающем боте. Ответ на «ping» и так короткий.
+        // Поля — те же, что в обычном шаге: что не примет проверка, не примет и разговор.
+        model: MODEL, messages: [{ role: 'user', content: 'ping' }],
         ...(KIMI_EFFORT ? { reasoning_effort: 'low' } : {}),
       } as any);
     } else {
@@ -167,6 +177,42 @@ export async function checkModel(): Promise<CheckResult> {
   }
 }
 
+// Голос распознаёт OpenAI. Если текст разбирает Claude или Kimi, ключ OpenAI выше не проверялся —
+// а в .env мог остаться старый или чужой. Проверяем его бесплатно (список моделей) и при отказе
+// выключаем голос: иначе портал видел бы voice=on, а человек получал на запись ошибку по-английски.
+// Деньги так не проверить (список моделей отдают и при пустом счёте) — об этом скажет voiceError.
+// Сеть не ответила — голос оставляем: это могло быть на минуту.
+export async function checkVoice(model: CheckResult): Promise<void> {
+  if (!VOICE_READY) return;
+  let k: ErrKind | null = null, e: unknown = null;
+  if (PROVIDER === 'openai') {
+    if (!model.ok && ['bad_key', 'no_money', 'region'].includes(model.code)) k = model.code as ErrKind;
+  } else {
+    try { await new OpenAI({ maxRetries: 0, timeout: 15_000 }).models.list(); }
+    catch (err) { e = err; const kk = errKind(err); if (kk === 'bad_key' || kk === 'no_money' || kk === 'region') k = kk; }
+  }
+  if (!k) return;
+  VOICE_READY = false;
+  VOICE_WHY = voiceError(k);
+  console.error('голосовые выключены: ключ OpenAI (OPENAI_API_KEY) для них не годится —',
+    e ? voiceLog(k, e) : ({ bad_key: 'ключ не подошёл', no_money: 'на счёте нет денег', region: 'не пускает из страны сервера' } as any)[k]);
+}
+
+// Ошибка распознавания голоса → слова человеку. Ключ здесь всегда OpenAI, какой бы ни была нейросеть для текста.
+export function voiceError(k: ErrKind): string {
+  switch (k) {
+    case 'bad_key': return 'Голосовые слушает нейросеть OpenAI, а она не принимает ключ (строка OPENAI_API_KEY в настройках бота). Напишите, пожалуйста, текстом.';
+    case 'no_money': return 'Голосовые слушает нейросеть OpenAI, а на её счёте закончились деньги (кабинет platform.openai.com). Напишите, пожалуйста, текстом.';
+    case 'region': return 'Голосовые слушает нейросеть OpenAI, а она не принимает запросы из страны, где стоит сервер бота. Напишите, пожалуйста, текстом.';
+    case 'rate': case 'down': return 'Не получилось расслушать запись: OpenAI сейчас не отвечает. Попробуйте через минуту или напишите текстом.';
+    default: return 'Не получилось расслушать запись. Напишите, пожалуйста, текстом.';
+  }
+}
+export function voiceLog(k: ErrKind, e: unknown): string {
+  const raw = String((e as Error)?.message || e || '').replace(/(sk|key)[-_][\w*.\-]{4,}/gi, '***').slice(0, 300);
+  return `голосовые (OpenAI): ${k} — ${raw}`;
+}
+
 // ---------------------------------------------------------------------------------------------
 // «Мотор» нейросети: агент ведёт петлю сам, мотор лишь делает один шаг и складывает его в историю.
 
@@ -179,9 +225,9 @@ export interface Engine {
   search: boolean;                                                // есть ли сейчас поиск в интернете
   prepare(): Promise<void>;                                       // перед ходом (Kimi: узнать, есть ли поиск)
   begin(history: any[], userText: string, now: Date): void;       // сообщение человека → в историю
-  step(history: any[], instructions: string, tools: FnTool[]): Promise<Step>;
+  step(history: any[], instructions: string, tools: FnTool[], signal?: AbortSignal): Promise<Step>;   // signal — ход вышел за время
   results(history: any[], outs: ToolOut[]): void;                 // результаты наших инструментов → в историю
-  own(call: Call): Promise<string | null>;                        // инструмент самой нейросети (не наш) — или null
+  own(call: Call, signal?: AbortSignal): Promise<string | null>;  // инструмент самой нейросети (не наш) — или null
 }
 
 const failed = (output: string) => output.startsWith('ошибка:');
@@ -194,14 +240,14 @@ function openaiEngine(): Engine {
     search: true,
     async prepare() { /* поиск у OpenAI есть всегда */ },
     begin(h, text) { h.push({ role: 'user', content: text }); },
-    async step(h, instructions, tools) {
+    async step(h, instructions, tools, signal) {
       const res: any = await client().responses.create({
         model: MODEL,
         instructions,
         input: h as any,
         tools: [...tools, { type: 'web_search' }] as any,   // плюс поиск в интернете, когда вопрос не про задачи
         store: false,                                       // переписку держим у себя, на стороне модели не храним
-      });
+      }, { signal });
       const out: any[] = res.output || [];
       h.push(...out);                                       // ответ модели целиком — он же контекст следующего шага
       return {
@@ -283,7 +329,7 @@ function anthropicEngine(): Engine {
       h.splice(0, h.length, ...tidyClaude(h));
       h.push({ role: 'user', content: datePrefix(now) + text });
     },
-    async step(h, system, tools) {
+    async step(h, system, tools, signal) {
       const fn = tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters as any }));
       const ask = (withSearch: boolean) => client().messages.create({
         model: MODEL,
@@ -293,12 +339,12 @@ function anthropicEngine(): Engine {
         tools: withSearch ? [...fn, CLAUDE_SEARCH] : fn,
         cache_control: { type: 'ephemeral' },               // system и инструменты одинаковы — берём из кеша, дешевле
         ...(CLAUDE_EFFORT ? { output_config: { effort: EFFORT as any } } : {}),
-      });
+      }, { signal });
       const send = async (): Promise<Anthropic.Message> => {
         try {
           return await ask(eng.search);
         } catch (e) {
-          if (!(e instanceof Anthropic.BadRequestError)) throw e;
+          if (!(e instanceof Anthropic.BadRequestError) || signal?.aborted) throw e;
           const msg = String(e.message || '');
           if (eng.search && /web.?search/i.test(msg)) {
             const res = await ask(false);                   // и без поиска не вышло — наверх уйдёт уже эта ошибка
@@ -319,6 +365,7 @@ function anthropicEngine(): Engine {
       let incomplete = false;
       // pause_turn: Anthropic прервал долгий поиск — отправляем ответ обратно как есть, он продолжит
       for (let i = 0; i < 4; i++) {
+        if (i && signal?.aborted) break;                     // время хода вышло — не продолжаем
         const res = await send();
         trace.push(res.content.map((b) => b.type + ((b as any).name ? ':' + (b as any).name : '')).join(', ') + ' | ' + res.stop_reason);
         if (res.stop_reason === 'refusal') {
@@ -406,19 +453,19 @@ function moonshotEngine(): Engine {
       h.splice(0, h.length, ...tidyKimi(h));
       h.push({ role: 'user', content: datePrefix(now) + text });
     },
-    async step(h, system, tools) {
+    async step(h, system, tools, signal) {
       const fn = tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } }));
       const ask = (extra: any[]) => client().chat.completions.create({
         model: MODEL,
         messages: [{ role: 'system', content: system }, ...h],
         tools: [...fn, ...extra],
         ...(KIMI_EFFORT ? { reasoning_effort: EFFORT } : {}),   // по умолчанию у Kimi max — медленно и дорого
-      } as any) as Promise<any>;
+      } as any, { signal }) as Promise<any>;
       let res: any;
       try {
         res = await ask(eng.search ? searchTools! : []);
       } catch (e) {
-        if (!(eng.search && (e as any)?.status === 400)) throw e;
+        if (!(eng.search && (e as any)?.status === 400) || signal?.aborted) throw e;
         res = await ask([]);                                   // поиск сломал запрос — без него
         searchTools = []; retryAt = Date.now() + 10 * 60_000; eng.search = false;
         console.error('Kimi не принял инструмент поиска — работаю без него:', logError(errKind(e), e));
@@ -436,10 +483,10 @@ function moonshotEngine(): Engine {
     results(h, outs) {
       for (const o of outs) h.push({ role: 'tool', tool_call_id: o.call.id, name: o.call.name, content: o.output });
     },
-    async own(call) {
+    async own(call, signal) {
       if (!names().has(call.name)) return null;
       try {
-        const d: any = await client().post(`${KIMI_SEARCH}/fibers`, { body: { name: call.name, arguments: call.args }, timeout: 60_000 });
+        const d: any = await client().post(`${KIMI_SEARCH}/fibers`, { body: { name: call.name, arguments: call.args }, timeout: 60_000, signal });
         const out = d?.context?.output ?? d?.context?.encrypted_output;
         if (out === undefined || out === null || out === '') return 'поиск ничего не вернул';
         return typeof out === 'string' ? out : JSON.stringify(out);

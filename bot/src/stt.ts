@@ -5,7 +5,10 @@ import OpenAI from 'openai';
 import { TG_API } from './status.ts';
 
 let _client: OpenAI | null = null;
-const client = (): OpenAI => (_client ||= new OpenAI());   // лениво: без ключа модуль не должен падать при загрузке
+// лениво: без ключа модуль не должен падать при загрузке.
+// ⚠️ Без повторов и с пределом в минуту (12.11.2026): повтор отправки записи после ошибки (429 «нет денег»)
+//    в пакете openai зависал — человек ждал ответа на голосовое минутами. Проверено на поддельном сервере.
+const client = (): OpenAI => (_client ||= new OpenAI({ maxRetries: 0, timeout: 60_000 }));
 const STT_MODEL = process.env.AGENT_STT_MODEL || 'gpt-4o-transcribe';
 const MAX_BYTES = 20 * 1024 * 1024;   // 20 МБ: длинные записи не тянем, честно скажем об этом
 

@@ -259,16 +259,26 @@ const DONE_WORDS: Record<string, string> = {
   set_task_tags: 'поменял метки',
 };
 
-export async function answer(history: Turn[], userText: string, tgId: string, userName: string): Promise<TurnResult> {
+// signal — ход вышел за время (index.ts ждёт 90 с). Без него старый ход доделывался бы «в фоне»: создавал
+// задачи и дописывал историю уже после ответа «долго не могу» — получались дубли и запутанный разговор
+// (замечание критика 12.11.2026). did — общий список сделанного: его видит и тот, кто прервал ход.
+export class Aborted extends Error { constructor() { super('ТАЙМАУТ'); } }
+
+export async function answer(history: Turn[], userText: string, tgId: string, userName: string,
+  opts: { signal?: AbortSignal; did?: string[] } = {}): Promise<TurnResult> {
+  const { signal } = opts;
+  const stop = () => { if (signal?.aborted) throw new Aborted(); };
   const llm = engine();
   await llm.prepare();
   const instructions = systemPrompt(userName, llm.search);   // один раз на ход: внутри хода system не меняется
   llm.begin(history, userText, new Date());
-  const did: string[] = [];          // только то, что РЕАЛЬНО отработало без ошибки
+  const did: string[] = opts.did || [];   // только то, что РЕАЛЬНО отработало без ошибки
   let reply = '';
   let truncated = false;
   for (let step = 0; step < MAX_STEPS; step++) {
-    const res = await llm.step(history, instructions, tools);
+    stop();
+    const res = await llm.step(history, instructions, tools, signal);
+    stop();
     if (DEBUG) console.error('[шаг ' + step + '] ' + res.trace + ' | текст: ' + JSON.stringify(res.text.slice(0, 200)));
     reply = res.text;                // берём текст ТОЛЬКО этого шага: старое обещание — не ответ
     if (res.incomplete) truncated = true;
@@ -277,8 +287,9 @@ export async function answer(history: Turn[], userText: string, tgId: string, us
     for (const c of res.calls) {
       let result: string;
       let ok = false;
+      stop();                                      // следующее действие в Таске после таймаута уже не делаем
       try {
-        const own = await llm.own(c);              // поиск Kimi исполняет сама нейросеть, а не Таска
+        const own = await llm.own(c, signal);              // поиск Kimi исполняет сама нейросеть, а не Таска
         if (own !== null) result = own;
         else {
           const args = c.args ? JSON.parse(c.args) : {};
@@ -296,6 +307,7 @@ export async function answer(history: Turn[], userText: string, tgId: string, us
       if (DEBUG) console.error('   → ' + c.name + '(' + String(c.args).slice(0, 120) + ') = ' + result.slice(0, 200));
       outs.push({ call: c, output: result });
     }
+    stop();
     llm.results(history, outs);
     if (step === MAX_STEPS - 1) truncated = true;   // вышли по счётчику: модель не успела подвести итог
   }
