@@ -8,8 +8,9 @@
 #   - база — свежий ночной дамп с сервера каждый день, на ноутбуке 30 копий;
 #   - файлы задач — полная копия, но докачивается только новое; прямо с сервера, без архивов на нём;
 #     удалённое на сервере у нас живёт ещё 30 дней;
-#   - на сервер пишем одно: отметку backups/.laptop-ok после удачной копии (по ней ночной отчёт
-#     сервера пишет «ноутбук не забирал копию N дней» — даже если ноутбук сломан или задачу выключили).
+#   - на сервер пишем только две отметки: backups/.laptop-ok (база забрана) и .laptop-files-ok (файлы
+#     сверены); по ним ночной отчёт сервера пишет «ноутбук не забирал копию / файлы задач N дней» —
+#     даже если ноутбук сломан или задачу выключили.
 #
 # ⚠️ Windows PowerShell 5.1:
 #   - файл сохранён в UTF-8 С BOM, иначе на русской Windows русские строки превратятся в кракозябры;
@@ -98,6 +99,16 @@ try {
 
 # ---------- блокировка: два запуска сразу писали бы один файл (установщик + Планировщик, вход + час) ----------
 $LockDir = Join-Path $StateDir 'lock'
+$Hung = 43200   # 12 часов: столько не идёт даже первая докачка большого хранилища на медленной связи
+# Жив, это PowerShell и запущен не позже, чем взял блокировку: номер процесса мог достаться другому
+# (после перезагрузки — например, окну PowerShell самого человека). Такую блокировку считаем брошенной,
+# а не «зависшей», — иначе через 12 часов мы убили бы чужую программу.
+function Ours([int]$id, [int64]$t) {
+  $p = Get-Process -Id $id -ErrorAction SilentlyContinue
+  if ($null -eq $p -or $p.ProcessName -notmatch '^(powershell|pwsh)$') { return $false }
+  try { $st = ([DateTimeOffset]$p.StartTime).ToUnixTimeSeconds() } catch { return $false }
+  return ($st -le $t + 5)
+}
 function Take-Lock {
   try {
     New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null
@@ -110,11 +121,16 @@ function Take-Lock {
     # хозяин только что создал папку и ещё не записал себя
     $age = ([DateTime]::Now - (Get-Item -LiteralPath $LockDir).LastWriteTime).TotalSeconds
     if ($age -lt 60) { return $false }
-  } else {
-    $alive = $null -ne (Get-Process -Id ([int]$parts[0]) -ErrorAction SilentlyContinue)
-    if ($alive -and ($NowS - [int64]$parts[1]) -lt 10800) { return $false }
+  } elseif (Ours ([int]$parts[0]) ([int64]$parts[1])) {
+    # Живую копию НЕ перехватываем никогда (замечание критика 12.11.2026: перехват через 3 ч давал
+    # два запуска в одной папке). Только явно зависшую дольше 12 ч — сначала убиваем вместе с sftp.
+    if (([DateTimeOffset]::Now.ToUnixTimeSeconds() - [int64]$parts[1]) -lt $Hung) { return $false }
+    Log "прошлый запуск (PID $($parts[0])) висит больше 12 часов — останавливаю его"
+    & "$env:WINDIR\System32\taskkill.exe" /PID $parts[0] /T /F 2>&1 | Out-Null
+    Start-Sleep -Seconds 3
+    if (Ours ([int]$parts[0]) ([int64]$parts[1])) { return $false }
   }
-  # брошенная: процесс умер или висит дольше 3 часов
+  # брошенная: процесс умер (или его остановили выше)
   Remove-Item -LiteralPath $LockDir -Recurse -Force -ErrorAction SilentlyContinue
   try {
     New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null
@@ -132,8 +148,11 @@ $PartName = ".part-$PID.sql.gz"
 
 function Finish([int]$code) {
   Remove-Item -LiteralPath (Join-Path $Dest $PartName) -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath (Join-Path $StateDir 'incoming') -Recurse -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $LockDir -Recurse -Force -ErrorAction SilentlyContinue
+  # incoming НЕ чистим: остатки оборванной докачки подберёт следующий запуск (см. Files-Step).
+  # Блокировку снимаем только СВОЮ: если нас остановили как зависших, её уже взял другой запуск.
+  $mine = $false
+  try { $mine = (([IO.File]::ReadAllText((Join-Path $LockDir 'info'))).Trim() -split ' ')[0] -eq "$PID" } catch {}
+  if ($mine) { Remove-Item -LiteralPath $LockDir -Recurse -Force -ErrorAction SilentlyContinue }
   exit $code
 }
 
@@ -338,43 +357,69 @@ function Files-Step {
   New-Item -ItemType Directory -Force -Path $FilesDir | Out-Null
   $haveFile = Join-Path $StateDir 'files.have'; $goneFile = Join-Path $StateDir 'files.gone'
   $have = Read-Tsv $haveFile
+  # списки — List, а не «$x += …»: на десятках тысяч файлов MinIO += копирует массив каждый раз (O(n²))
+  $gotList = New-Object 'System.Collections.Generic.List[string]'
+  # Остатки оборванной докачки (Планировщик убил задачу по времени, выключение, сон): докачанное целиком
+  # кладём на место, а не качаем заново — иначе на медленной связи первая полная копия не закончилась бы
+  # никогда (замечание критика 12.11.2026). Берём файл, только если на сервере он всё тот же.
+  $inc = Join-Path $StateDir 'incoming'
+  $needFile = Join-Path $inc 'need.tsv'
+  if (Test-Path -LiteralPath $needFile) {
+    foreach ($kv in (Read-Tsv $needFile).GetEnumerator()) {
+      $p = $kv.Key
+      if (-not $remote.Contains($p) -or "$($remote[$p][0])`t$($remote[$p][1])" -ne $kv.Value) { continue }
+      $src = Join-Path $inc ($p.Replace('/', '\'))
+      if ((Test-Path -LiteralPath $src) -and (Get-Item -LiteralPath $src).Length -eq $remote[$p][0]) {
+        $dst = Join-Path $FilesDir ($p.Replace('/', '\'))
+        New-Item -ItemType Directory -Force -Path (Split-Path -Path $dst -Parent) | Out-Null
+        Move-Item -LiteralPath $src -Destination $dst -Force
+        $gotList.Add($p); $have[$p] = $kv.Value
+      }
+    }
+    if ($gotList.Count -gt 0) { Log "файлы задач: с прошлой оборванной докачки взял готовых $($gotList.Count)" }
+  }
+  Remove-Item -LiteralPath $inc -Recurse -Force -ErrorAction SilentlyContinue
   $local = @{}
   $root = (Resolve-Path -LiteralPath $FilesDir).ProviderPath.TrimEnd('\', '/')
   foreach ($fi in (Get-ChildItem -LiteralPath $FilesDir -Recurse -File -Force -ErrorAction SilentlyContinue)) {
     $local[$fi.FullName.Substring($root.Length + 1).Replace('\', '/')] = $fi.Length
   }
   # нужно: нового нет у нас, изменился (размер/время на сервере) или наш файл пропал/недокачан
-  $need = @()
+  $need = New-Object 'System.Collections.Generic.List[string]'
   foreach ($p in $remote.Keys) {
     $sz = $remote[$p][0]; $mt = $remote[$p][1]
-    if (-not ($have.ContainsKey($p) -and $have[$p] -eq "$sz`t$mt" -and $local.ContainsKey($p) -and $local[$p] -eq $sz)) { $need += $p }
+    if (-not ($have.ContainsKey($p) -and $have[$p] -eq "$sz`t$mt" -and $local.ContainsKey($p) -and $local[$p] -eq $sz)) { $need.Add($p) }
   }
   [int64]$needB = 0; foreach ($p in $need) { $needB += $remote[$p][0] }
-  $gotList = @(); $missing = 0; $failed = $false
+  $missing = 0; $failed = $false
   if ($need.Count -gt 0) {
     $free = FreeBytes
     if ($needB + 1GB -gt $free) { $script:FPMsg = "на этом компьютере мало места: для файлов задач нужно ещё $(HSize $needB), свободно $(HSize $free)."; return }
     Log "файлы задач: докачиваю $($need.Count) ($(HSize $needB))"
     # Качаем во временную папку одним соединением, на место кладём только проверенное по размеру:
     # оборванная докачка не оставит в копии полфайла. Пути в пакете — относительные, только латиница.
-    $inc = Join-Path $StateDir 'incoming'
-    Remove-Item -LiteralPath $inc -Recurse -Force -ErrorAction SilentlyContinue
+    # Список need.tsv — для подбора остатков, если нас оборвут (см. выше).
     New-Item -ItemType Directory -Force -Path $inc | Out-Null
-    $batch = New-Object System.Text.StringBuilder
+    $batch = New-Object System.Text.StringBuilder; $nl = New-Object System.Text.StringBuilder
+    $dirs = New-Object 'System.Collections.Generic.HashSet[string]'
     foreach ($p in $need) {
       $dir = Split-Path -Path ($p.Replace('/', '\')) -Parent
-      if ($dir) { New-Item -ItemType Directory -Force -Path (Join-Path $inc $dir) | Out-Null }
+      if ($dir -and $dirs.Add($dir)) { New-Item -ItemType Directory -Force -Path (Join-Path $inc $dir) | Out-Null }
       [void]$batch.Append("-get `"$rdir/$p`" `"$p`"`n")
+      [void]$nl.Append("$($remote[$p][0])`t$($remote[$p][1])`t$p`n")
     }
+    [IO.File]::WriteAllText($needFile, $nl.ToString(), $Utf8)
     [IO.File]::WriteAllText((Join-Path $inc 'batch.txt'), $batch.ToString(), $Utf8)
-    $sr = Run $Sftp "-q -b batch.txt $SshOpts $HostName" $inc 3600
+    # Предел sftp (3 ч) меньше предела задачи в Планировщике (4 ч, install-windows.ps1): успеваем
+    # переложить скачанное и записать учёт. А если задачу всё же убьют — остатки подберёт следующий запуск.
+    $sr = Run $Sftp "-q -b batch.txt $SshOpts $HostName" $inc 10800
     foreach ($p in $need) {
       $src = Join-Path $inc ($p.Replace('/', '\'))
       if ((Test-Path -LiteralPath $src) -and (Get-Item -LiteralPath $src).Length -eq $remote[$p][0]) {
         $dst = Join-Path $FilesDir ($p.Replace('/', '\'))
         New-Item -ItemType Directory -Force -Path (Split-Path -Path $dst -Parent) | Out-Null
         Move-Item -LiteralPath $src -Destination $dst -Force
-        $gotList += $p
+        $gotList.Add($p)
       } else { $missing++ }
     }
     Remove-Item -LiteralPath $inc -Recurse -Force -ErrorAction SilentlyContinue
@@ -420,7 +465,8 @@ if (-not $Now) {
   $c = @(Copies)
   $nlDay = ''; if ($c.Count -gt 0) { $nlDay = $c[-1].Name.Substring(6, 10) }
   # Решаем по файлам, а не по часам: копия с сегодняшней датой есть и файлы сегодня сверены — сеть не трогаем.
-  if ($nlDay -and $nlDay -ge $Today -and (Read-Line 'files_day') -eq $Today) {
+  # Отметки на сервере тоже должны быть сегодняшние: не поставилась (обрыв) — повторим через час.
+  if ($nlDay -and $nlDay -ge $Today -and (Read-Line 'files_day') -eq $Today -and (Read-Line 'mark_day') -eq $Today -and (Read-Line 'fmark_day') -eq $Today) {
     Log 'запуск по расписанию: копия за сегодня уже есть'; Finish 0
   }
   Log "запуск по расписанию (версия $Version)"
@@ -435,12 +481,20 @@ if ($c.Count -gt $Keep) {
   foreach ($f in ($c | Select-Object -First ($c.Count - $Keep))) { Remove-Item -LiteralPath $f.FullName -Force; Log "старая копия $($f.Name) удалена (храню $Keep)" }
 }
 
+# Отметки для ночного отчёта сервера — раз в день, каждая своя (замечание критика 12.11.2026):
+#   .laptop-ok — база забрана; .laptop-files-ok — файлы задач сверены. Первая отметка базы заводит
+#   и вторую, если её ещё нет, — от неё и пойдёт отсчёт «не забирал файлы задач».
 if ($script:DbOk) {
   Set-State 'last_good' $NowS
-  if ((Read-Line 'mark_day') -ne $Today) {   # отметка для ночного отчёта сервера — раз в день
-    RSsh "touch $Remote/backups/.laptop-ok" | Out-Null
+  if ((Read-Line 'mark_day') -ne $Today) {
+    # (без кавычек: ssh склеит слова в одну строку, && и { } разберёт оболочка сервера)
+    RSsh "touch $Remote/backups/.laptop-ok && { [ -e $Remote/backups/.laptop-files-ok ] || touch $Remote/backups/.laptop-files-ok; }" | Out-Null
     if ($script:Kind -eq 'ok') { Set-State 'mark_day' $Today }
   }
+}
+if ((Read-Line 'files_day') -eq $Today -and (Read-Line 'fmark_day') -ne $Today) {
+  RSsh "touch $Remote/backups/.laptop-files-ok" | Out-Null
+  if ($script:Kind -eq 'ok') { Set-State 'fmark_day' $Today }
 }
 if ($script:Problem) { Log "ОШИБКА: $($script:PMsg)" }
 

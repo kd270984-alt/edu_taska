@@ -14,8 +14,10 @@
 #   - сначала первая копия напрямую (её вывод видит помощник), потом задача; у копии своя блокировка;
 #   - первый запуск задачи — в ближайший БУДУЩИЙ час, а не «сегодня в 9:00» (прошедшее время вместе
 #     с «как можно скорее» запускало задачу прямо при регистрации, вторым экземпляром);
-#   - Start-ScheduledTask асинхронный: ждём, пока задача закончит (не дольше 60 с), и только потом
-#     смотрим её итог; весь установщик укладывается в 90 с — у помощника тайм-аут на команду;
+#   - Start-ScheduledTask асинхронный: ждём отметку её запуска (не дольше 60 с); весь установщик
+#     укладывается в 90 с — у помощника тайм-аут на команду. Если на медленной связи время кончилось
+#     раньше проверки — код 4 «поставлено, но не проверено», а не ложное «НЕ УСТАНОВЛЕНО» (критик 12.11);
+#   - предел задачи 4 ч (у sftp внутри — 3 ч), а оборванная докачка не теряется: см. taska-backup.ps1;
 #   - от батареи задача запускается (по умолчанию Windows её бы не запускала никогда);
 #   - установщик работает только от того, кто сейчас за компьютером (песочница помощника может
 #     запустить его от другой учётки — тогда задача встала бы не тому человеку).
@@ -55,7 +57,11 @@ function Run([string]$exe, [string]$argline, [string]$cwd = $null, [int]$timeout
   try { $p = [System.Diagnostics.Process]::Start($psi) } catch { return @{ Code = 127; Out = ''; Err = "$_" } }
   $p.StandardInput.Close()
   $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()
-  if (-not $p.WaitForExit($timeout * 1000)) { try { $p.Kill() } catch {}; $p.WaitForExit() | Out-Null; return @{ Code = 255; Out = $o.Result; Err = 'Connection timed out (killed)' } }
+  if (-not $p.WaitForExit($timeout * 1000)) {
+    # всем деревом: иначе scp, запущенный первой копией, остался бы качать сиротой
+    & "$env:WINDIR\System32\taskkill.exe" /PID $p.Id /T /F 2>&1 | Out-Null
+    try { $p.Kill() } catch {}; $p.WaitForExit() | Out-Null; return @{ Code = 255; Out = $o.Result; Err = 'Connection timed out (killed)' }
+  }
   $p.WaitForExit()
   return @{ Code = $p.ExitCode; Out = $o.Result; Err = $e.Result }
 }
@@ -138,7 +144,10 @@ $Script = Join-Path $App 'taska-backup.ps1'
 # всегда Windows PowerShell 5.1 (даже если установщик запустили из PowerShell 7)
 $Ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'; if (-not (Test-Path -LiteralPath $Ps)) { $Ps = 'powershell.exe' }
 Say 'первая копия базы:'
-$first = Run $Ps "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Script`" -Now" $null 75
+# Предел первой копии — из того, что осталось от 90 с (на медленной связи проверки выше могли занять
+# своё), с запасом ~15 с на постановку задачи. Не уложилась — задачу всё равно ставим: копию сделает она.
+$left = [int](75 - ((Get-Date) - $T0).TotalSeconds); if ($left -lt 20) { $left = 20 }
+$first = Run $Ps "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Script`" -Now" $null $left
 foreach ($l in ($first.Out -split "`n" | Where-Object { $_.Trim() })) { [Console]::Out.WriteLine("    $($l.TrimEnd())") }
 $FirstCode = $first.Code
 
@@ -193,7 +202,7 @@ $xml = @"
     <AllowStartOnDemand>true</AllowStartOnDemand>
     <Enabled>true</Enabled>
     <Hidden>false</Hidden>
-    <ExecutionTimeLimit>PT1H</ExecutionTimeLimit>
+    <ExecutionTimeLimit>PT4H</ExecutionTimeLimit>
     <Priority>7</Priority>
   </Settings>
   <Actions Context="Author">
@@ -214,6 +223,13 @@ while ((([DateTimeOffset]::Now.ToUnixTimeSeconds()) - $T1) -lt 60 -and ((Get-Dat
   $s = 0; try { $s = [int64](([IO.File]::ReadAllText($sched)) -replace '[^0-9]', '') } catch {}
   if ($s -ge $T1) { $ok = $true; break }
 }
+if (-not $ok -and ([DateTimeOffset]::Now.ToUnixTimeSeconds() - $T1) -lt 55) {
+  # Не «не установлено»: задача стоит, просто на медленной связи 90 с кончились раньше, чем мы
+  # дождались её запуска (замечание критика 12.11.2026). Отдельный код 4 — помощнику НЕ надо чинить.
+  [Console]::Out.WriteLine('')
+  [Console]::Out.WriteLine("ПОСТАВЛЕНО, НО НЕ ПРОВЕРЕНО: задача $TaskName в Планировщике стоит, а проверить её первый запуск не хватило времени (медленная связь). Ничего не чините: через 5 минут откройте $Dest\Последняя копия.txt — там должна быть свежая «Последняя проверка».")
+  exit 4
+}
 if (-not $ok) { Stop-Install "задача поставлена, но её запуск не прошёл за минуту. Откройте Планировщик заданий → задача $TaskName → вкладка «Журнал» и покажите помощнику последнюю ошибку." }
 Say 'задача в Планировщике стоит и сработала: каждый час, при входе в Windows и сразу после сна'
 
@@ -227,6 +243,7 @@ if ($env:TASKA_NO_OPEN -ne '1') { Start-Process explorer.exe -ArgumentList "`"$D
 if ($FirstCode -ne 0) {
   $first1 = ''
   try { $first1 = (Get-Content -LiteralPath (Join-Path $Dest 'Последняя копия.txt') -Encoding UTF8 -TotalCount 1) -replace '^ВНИМАНИЕ: ', '' } catch {}
+  if ($first.Code -eq 255 -and $first.Err -match 'killed') { $first1 = 'не уложилась во время установки (медленная связь) — её доделает задача в Планировщике в течение часа.' }
   [Console]::Out.WriteLine('')
   [Console]::Out.WriteLine("НО ПЕРВАЯ КОПИЯ НЕ ВЫШЛА: $first1")
   exit 2

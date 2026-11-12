@@ -3,6 +3,7 @@
 #   bash scripts/restore.sh backups/2026-11-12.sql.gz            — показать, что будет, и остановиться
 #   bash scripts/restore.sh backups/2026-11-12.sql.gz --yes      — вернуть базу (ВСЁ текущее заменится)
 #   bash scripts/restore.sh --files backups/restore-files --yes  — вернуть файлы задач из копии с ноутбука
+#     (рядом можно положить backups/restore-files.gone — список удалённого на сервере, см. ниже)
 #
 # Возврат заменяет всё, что сейчас в Таске, поэтому без --yes скрипт только объясняет и выходит:
 # помощник обязан спросить человека и лишь потом повторить с --yes (решение владельца 11.11.2026).
@@ -60,17 +61,37 @@ if [ "$MODE" = files ]; then
   [ -n "$C" ] || stop "не найден контейнер minio — Таска запущена? (docker compose up -d)"
   VOL=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' "$C")
   [ -n "$VOL" ] || stop "не нашёл том с файлами у контейнера minio."
-  N=$(find "$SRC" -type f | wc -l | tr -d ' '); SZ=$(du -sh "$SRC" | cut -f1)
+  SRCA=$(cd "$SRC" && pwd)
+  # Удалённое на сервере ноутбук держит у себя ещё 30 дней в той же папке files. Вернуть его в хранилище —
+  # значит засорить маленький диск «сиротами», на которые в базе нет ссылок (замечание критика 12.11.2026).
+  # Поэтому пропускаем пути из списка ноутбука .state/files.gone, если его положили рядом: ПАПКА.gone.
+  GONE="${SRCA}.gone"; LIST=$(mktemp); SKIP=0
+  ( cd "$SRCA" && find . -type f | sed 's|^\./||' ) | sort > "$LIST.all"
+  if [ -f "$GONE" ]; then
+    cut -f2 "$GONE" | sed '/^$/d' | sort -u > "$LIST.gone"
+    comm -23 "$LIST.all" "$LIST.gone" > "$LIST"
+    SKIP=$(( $(wc -l < "$LIST.all") - $(wc -l < "$LIST") ))
+  else
+    cp "$LIST.all" "$LIST"
+  fi
+  rm -f "$LIST.all" "$LIST.gone"
+  N=$(wc -l < "$LIST" | tr -d ' ')
+  NEED=$(cd "$SRCA" && tr '\n' '\0' < "$LIST" | xargs -0 du -k 2>/dev/null | awk '{s+=$1} END{print s+0}')
+  SZ=$(awk -v k="$NEED" 'BEGIN{ if (k<1024) printf "%d КБ", k; else if (k<1048576) printf "%.1f МБ", k/1024; else printf "%.1f ГБ", k/1048576 }' | tr . ,)
   echo "Будет: файлы задач из $SRC ($N файлов, $SZ) лягут в хранилище Таски (том $VOL)."
+  if [ -f "$GONE" ]; then echo "Пропускаю $SKIP файлов, удалённых на сервере (список $GONE)."
+  else echo "⚠️ Списка удалённого ($GONE) нет — вернутся и файлы, удалённые на сервере за последние 30 дней."; fi
   echo "Файлы с теми же именами заменятся копией, остальные останутся. Таска на минуту остановится."
-  if [ "$YES" != 1 ]; then echo; echo "Ничего не сделано. Спросите человека и повторите с --yes."; exit 3; fi
+  if [ "$YES" != 1 ]; then rm -f "$LIST"; echo; echo "Ничего не сделано. Спросите человека и повторите с --yes."; exit 3; fi
   FREE=$(df -Pk "$(docker volume inspect -f '{{.Mountpoint}}' "$VOL" 2>/dev/null || echo /)" 2>/dev/null | awk 'NR==2{print $4}')
-  NEED=$(du -sk "$SRC" | cut -f1)
   [ -z "$FREE" ] || [ "$FREE" -gt $(( NEED + 524288 )) ] || stop "на сервере мало места: нужно ещё $SZ и запас 0,5 ГБ."
   docker compose stop api minio >/dev/null || stop "не смог остановить Таску."
   STOPPED="minio api"
-  docker run --rm -v "$VOL":/data -v "$(cd "$SRC" && pwd)":/src:ro alpine:3.20 sh -c 'cp -a /src/. /data/' \
-    || stop "файлы не скопировались — хранилище осталось как было, Таска запускается обратно."
+  # tar по списку: так пропуск удалённого работает, а права и время файлов сохраняются, как у cp -a
+  docker run --rm -v "$VOL":/data -v "$SRCA":/src:ro -v "$LIST":/list:ro alpine:3.20 \
+      sh -c 'cd /src && tar -cf - -T /list | tar -C /data -xpf -' \
+    || { rm -f "$LIST"; stop "файлы скопировались не до конца — Таска запускается обратно, повторите команду (уже скопированное просто заменится тем же)."; }
+  rm -f "$LIST"
   restart
   health || stop "Таска не ответила после возврата файлов: docker compose logs api --tail 50"
   echo "Готово: файлы задач возвращены, Таска работает. Откройте задачу с вложением и проверьте, что файл скачивается."

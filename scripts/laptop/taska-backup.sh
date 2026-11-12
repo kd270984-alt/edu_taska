@@ -10,9 +10,10 @@
 #   - файлы задач — полная копия, но докачивается только новое; прямо с сервера, без архивов на нём
 #     (диск сервера маленький); удалённое на сервере у нас живёт ещё 30 дней.
 #
-# Что делает на сервере: читает (ls, sha256sum, список файлов, скачивание) и ОДНА запись — отметка
-# backups/.laptop-ok после удачной копии. По ней ночная копия сервера пишет «ноутбук не забирал копию
-# N дней»: этот сигнал работает, даже если ноутбук сломан, выключен или задачу выключили.
+# Что делает на сервере: читает (ls, sha256sum, список файлов, скачивание) и пишет только две отметки:
+# backups/.laptop-ok (база забрана) и backups/.laptop-files-ok (файлы задач сверены). По ним ночная
+# копия сервера пишет «ноутбук не забирал копию / файлы задач N дней»: этот сигнал работает, даже если
+# ноутбук сломан, выключен или задачу выключили.
 #
 # ⚠️ /bin/bash на Mac — версия 3.2: без mapfile, ${x,,} и словарей. Утилиты BSD: stat -f, date -v.
 # ⚠️ Окно тревоги показываем отдельным процессом и не ждём: иначе открытое окно держало бы запуск,
@@ -55,6 +56,16 @@ ERRF="$TMPD/err"; : > "$ERRF"
 
 # ---------- блокировка: два запуска сразу писали бы один файл (установщик + launchd, сон + вход) ----------
 LOCK="$STATE/lock"
+HUNG=${TASKA_HUNG_SECONDS:-43200}   # 12 часов (переменная — только для проверок): столько не идёт даже первая докачка большого хранилища на медленной связи
+# ours PID ВРЕМЯ — жив, это наша копия и запущен не позже, чем взял блокировку: номер процесса мог
+# достаться другому (после перезагрузки), и такую блокировку надо считать брошенной, а не «зависшей».
+ours(){
+  ps -p "$1" -o command= 2>/dev/null | grep -q 'taska-backup' || return 1
+  local el; el=$(ps -p "$1" -o etime= 2>/dev/null | awk '{s=$1; d=0; if (index(s,"-")) {split(s,x,"-"); d=x[1]; s=x[2]}
+     n=split(s,t,":"); print d*86400 + (n==3 ? t[1]*3600+t[2]*60+t[3] : t[1]*60+t[2])}')
+  [ -n "$el" ] && [ $(( $(date +%s) - el )) -le $(( ${2:-0} + 5 )) ]
+}
+kill_tree(){ local c; for c in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$c"; done; kill -TERM "$1" 2>/dev/null; }
 take_lock(){
   if mkdir "$LOCK" 2>/dev/null; then echo "$$ $NOW" > "$LOCK/info"; return 0; fi
   local pid="" t="" age
@@ -62,24 +73,38 @@ take_lock(){
   if [ -z "$pid" ]; then   # хозяин только что создал папку и ещё не записал себя
     age=$(( $(date +%s) - $(stat -f %m "$LOCK" 2>/dev/null || echo 0) ))
     [ "$age" -lt 60 ] && return 1
-  elif kill -0 "$pid" 2>/dev/null && [ $(( $(date +%s) - ${t:-0} )) -lt 10800 ]; then
-    return 1
+  elif ours "$pid" "$t"; then
+    # Живую копию НЕ перехватываем никогда (замечание критика 12.11.2026: перехват через 3 ч давал
+    # два запуска в одной папке). Только явно зависшую дольше 12 ч — сначала убиваем вместе с sftp.
+    [ $(( $(date +%s) - ${t:-0} )) -lt $HUNG ] && return 1
+    log "прошлый запуск (PID $pid) висит больше 12 часов — останавливаю его"
+    kill_tree "$pid"; sleep 3; ours "$pid" "$t" && return 1
   fi
-  # брошенная: процесс умер или висит дольше 3 часов
+  # брошенная: процесс умер (или его остановили выше)
   rm -rf "$LOCK"; mkdir "$LOCK" 2>/dev/null || return 1
   echo "$$ $NOW" > "$LOCK/info"; return 0
 }
-HAVE_LOCK=0
+HAVE_LOCK=0; WD=""
 cleanup(){
-  [ "$HAVE_LOCK" = 1 ] && rm -rf "$LOCK"
+  [ -n "$WD" ] && kill "$WD" 2>/dev/null
+  # снимаем только СВОЮ блокировку: если нас остановили как зависших, её уже взял другой запуск
+  if [ "$HAVE_LOCK" = 1 ]; then local p=""; read -r p _ < "$LOCK/info" 2>/dev/null; [ "$p" = "$$" ] && rm -rf "$LOCK"; fi
   rm -rf "$TMPD" "$DEST"/.part-$$.sql.gz
 }
 trap cleanup EXIT
-trap 'exit 1' INT TERM HUP
+trap 'log "копию остановили, не дав закончить — продолжит следующий запуск"; exit 1' INT TERM HUP
+
+# Установщик даёт нам только остаток своих 90 с (TASKA_DEADLINE, замечание критика 12.11.2026).
+# Не уложились — сторож останавливает нас вместе с scp; копию доделает расписание.
+if [ "$MODE" = now ] && [ -n "${TASKA_DEADLINE:-}" ]; then
+  left=$(( TASKA_DEADLINE - $(date +%s) )); [ "$left" -lt 20 ] && left=20
+  bash -c 'sleep "$1"; k(){ local c; for c in $(pgrep -P "$1"); do [ "$c" = "$$" ] || k "$c"; done; kill -TERM "$1" 2>/dev/null; }; k "$2"' _ "$left" "$$" > /dev/null 2>&1 &
+  WD=$!
+fi
 
 if ! take_lock; then
   if [ "$MODE" = now ]; then   # установщику — подождать идущий запуск, но не дольше минуты
-    i=0; while [ $i -lt 30 ] && ! take_lock; do sleep 2; i=$((i+1)); done
+    i=0; while [ $i -lt 30 ] && ! take_lock; do sleep 2; i=$((i+1)); [ -n "${TASKA_DEADLINE:-}" ] && [ "$(date +%s)" -ge $(( TASKA_DEADLINE - 10 )) ] && i=30; done
     [ $i -lt 30 ] || { log "копия уже идёт другим запуском — подождите минуту и повторите"; exit 3; }
   else
     log "копия уже идёт другим запуском — этот пропускаю"; exit 0
@@ -228,6 +253,24 @@ files_step(){
     FPMSG="список файлов с сервера пришёл неполным — попробую в следующий раз."; return 1   # и ничего не трогаем
   fi
   mkdir -p "$FILES"; touch "$STATE/files.have" "$STATE/files.gone"
+  : > "$TMPD/got"
+  # Остатки оборванной докачки (сон, выключение, убитый процесс): докачанное целиком кладём на место,
+  # а не качаем заново — иначе на медленной связи первая полная копия не закончилась бы никогда.
+  # Берём файл, только если на сервере он всё тот же (размер и время из списка, по которому качали).
+  local inc="$STATE/incoming" sz mt p
+  if [ -f "$inc/.need" ]; then
+    awk 'BEGIN{FS=OFS="\t"} FILENAME==ARGV[1]{r[$3]=$1 FS $2; next} ($3 in r) && r[$3]==$1 FS $2' \
+        "$TMPD/remote" "$inc/.need" > "$TMPD/salv"
+    while IFS="$TAB" read -r sz mt p; do
+      if [ -f "$inc/$p" ] && [ "$(stat -f %z "$inc/$p")" = "$sz" ]; then
+        mkdir -p "$FILES/$(dirname "$p")" && mv -f "$inc/$p" "$FILES/$p" && printf '%s\t%s\t%s\n' "$sz" "$mt" "$p" >> "$TMPD/got"
+      fi
+    done < "$TMPD/salv"
+    [ -s "$TMPD/got" ] && log "файлы задач: с прошлой оборванной докачки взял готовых $(wc -l < "$TMPD/got" | tr -d ' ')"
+    awk 'BEGIN{FS=OFS="\t"} FILENAME==ARGV[1]{got[$3]=1; print; next} !($3 in got)' "$TMPD/got" "$STATE/files.have" > "$TMPD/have0" \
+      && cp "$TMPD/have0" "$STATE/files.have"
+  fi
+  rm -rf "$inc"
   ( cd "$FILES" && find . -type f -print0 | xargs -0 stat -f '%z%t%N' 2>/dev/null ) \
     | awk 'BEGIN{FS=OFS="\t"} {sub(/^\.\//,"",$2); print}' > "$TMPD/local"
   # нужно: нового нет у нас, изменился (размер/время на сервере) или наш файл пропал/недокачан
@@ -238,7 +281,6 @@ files_step(){
        "$STATE/files.have" "$TMPD/local" "$TMPD/remote" > "$TMPD/need"
   need_n=$(wc -l < "$TMPD/need" | tr -d ' ')
   need_b=$(awk -F'\t' '{s+=$1} END{printf "%.0f", s}' "$TMPD/need")
-  : > "$TMPD/got"
   if [ "$need_n" -gt 0 ]; then
     avail=$(df -k "$DEST" | awk 'NR==2{print $4}')
     if [ $(( need_b / 1024 + 1048576 )) -gt "${avail:-0}" ]; then
@@ -246,12 +288,11 @@ files_step(){
     fi
     log "файлы задач: докачиваю $need_n ($(hsize "$need_b"))"
     # Качаем во временную папку одним соединением, на место кладём только проверенное по размеру:
-    # оборванная докачка не оставит в копии полфайла.
-    local inc="$STATE/incoming"; rm -rf "$inc"; mkdir -p "$inc"
+    # оборванная докачка не оставит в копии полфайла. Список .need — для подбора остатков (см. выше).
+    mkdir -p "$inc" && cp "$TMPD/need" "$inc/.need"
     awk -F'\t' '{p=$3; if (sub(/\/[^\/]*$/,"",p)) print p}' "$TMPD/need" | sort -u | tr '\n' '\0' | ( cd "$inc" && xargs -0 mkdir -p )
     awk -F'\t' -v r="$rdir" '{printf "-get \"%s/%s\" \"%s\"\n", r, $3, $3}' "$TMPD/need" > "$TMPD/batch"
     ( cd "$inc" && sftp -q -b "$TMPD/batch" "${SSH_BASE[@]}" "$HOST" ) < /dev/null > /dev/null 2> "$ERRF"; rc=$?
-    local sz mt p
     while IFS="$TAB" read -r sz mt p; do
       if [ -f "$inc/$p" ] && [ "$(stat -f %z "$inc/$p")" = "$sz" ]; then
         mkdir -p "$FILES/$(dirname "$p")" && mv -f "$inc/$p" "$FILES/$p" && printf '%s\t%s\t%s\n' "$sz" "$mt" "$p" >> "$TMPD/got"
@@ -291,7 +332,9 @@ if [ "$MODE" = sched ]; then
   nl_day=${newest_local#taska-}; nl_day=${nl_day%.sql.gz}
   # Решаем по файлам, а не по часам: копия с сегодняшней датой есть и файлы сегодня сверены — сеть не трогаем.
   # (Дата копии — по часам сервера; у тех, кто восточнее сервера, «сегодняшняя» придёт к обеду — это нормально.)
-  if [ -n "$nl_day" ] && ! [ "$nl_day" \< "$TODAY" ] && [ "$(cat "$STATE/files_day" 2>/dev/null)" = "$TODAY" ]; then
+  # Отметки на сервере тоже должны быть сегодняшние: не поставилась (обрыв) — повторим через час.
+  if [ -n "$nl_day" ] && ! [ "$nl_day" \< "$TODAY" ] && [ "$(cat "$STATE/files_day" 2>/dev/null)" = "$TODAY" ] \
+     && [ "$(cat "$STATE/mark_day" 2>/dev/null)" = "$TODAY" ] && [ "$(cat "$STATE/fmark_day" 2>/dev/null)" = "$TODAY" ]; then
     log "запуск по расписанию: копия за сегодня уже есть"; exit 0
   fi
   log "запуск по расписанию (версия $VERSION)"
@@ -310,12 +353,21 @@ ls -1 "$DEST" | grep -E '^taska-[0-9]{4}-[0-9]{2}-[0-9]{2}\.sql\.gz$' | sort -r 
   rm -f "$DEST/$f"; log "старая копия $f удалена (храню $KEEP)"
 done
 
+# Отметки для ночного отчёта сервера — раз в день, каждая своя (замечание критика 12.11.2026):
+#   .laptop-ok        — база забрана;
+#   .laptop-files-ok  — файлы задач сверены. Без неё сервер молчал бы, если файлы неделями не копируются
+#                       (мало места на ноутбуке, обрыв, хранилище переехало). Первая отметка базы
+#                       заводит и её, если её ещё нет, — от неё и пойдёт отсчёт «не забирал файлы».
 if [ "$DB_OK" = 1 ]; then
   echo "$NOW" > "$STATE/last_good"
-  if [ "$(cat "$STATE/mark_day" 2>/dev/null)" != "$TODAY" ]; then   # отметка для ночного отчёта сервера — раз в день
-    rssh /dev/null touch "$REMOTE/backups/.laptop-ok"
+  if [ "$(cat "$STATE/mark_day" 2>/dev/null)" != "$TODAY" ]; then
+    rssh /dev/null "touch $REMOTE/backups/.laptop-ok && { [ -e $REMOTE/backups/.laptop-files-ok ] || touch $REMOTE/backups/.laptop-files-ok; }"
     [ "$KIND" = ok ] && echo "$TODAY" > "$STATE/mark_day"
   fi
+fi
+if [ "$(cat "$STATE/files_day" 2>/dev/null)" = "$TODAY" ] && [ "$(cat "$STATE/fmark_day" 2>/dev/null)" != "$TODAY" ]; then
+  rssh /dev/null touch "$REMOTE/backups/.laptop-files-ok"
+  [ "$KIND" = ok ] && echo "$TODAY" > "$STATE/fmark_day"
 fi
 [ -n "$PROBLEM" ] && log "ОШИБКА: $PMSG"
 
