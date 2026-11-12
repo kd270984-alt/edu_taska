@@ -3723,10 +3723,10 @@ function paintCrmBody(){
   const host=document.getElementById('crmBody'); if(!host||!crmData) return;
   const {C,D,P}=crmData, q=crmQ.trim().toLowerCase();
   if(!C.length&&!D.length&&!P.length){
-    host.innerHTML='<div class="lempty">В CRM пока пусто. '
-      +(crmTab==='goods'?(amAdmin()?'Добавьте первый товар кнопкой «Товар» вверху':'')
-        :crmCanWrite()?'Начните с клиента: вкладка «Клиенты», кнопка «Клиент» вверху':'')
-      +(amAdmin()?' — или загрузите готовый пример.':'')
+    const hint=crmTab==='goods'?(amAdmin()?'Добавьте первый товар кнопкой «Товар» вверху':'')
+              :crmCanWrite()?'Начните с клиента: вкладка «Клиенты», кнопка «Клиент» вверху':'';
+    host.innerHTML='<div class="lempty">В CRM пока пусто.'
+      +(hint?' '+hint+(amAdmin()?' — или загрузите готовый пример.':'.'):'')
       +(amAdmin()?'<div style="margin-top:14px"><button class="tbtn" id="crmDemo">Загрузить пример «Плёнка и Короб»</button></div>'
                  :'<br>Готовый пример загружает администратор.')+'</div>';
     const db=document.getElementById('crmDemo');
