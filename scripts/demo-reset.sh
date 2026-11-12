@@ -17,7 +17,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 BASE="${1:-http://127.0.0.1:8088}"
 PGU=$(grep -E '^POSTGRES_USER=' .env | cut -d= -f2); PGD=$(grep -E '^POSTGRES_DB=' .env | cut -d= -f2)
-AGENT=$(grep -E '^AGENT_EMAIL=' .env | cut -d= -f2 | tr -d ' '); AGENT="${AGENT:-agent@taska.local}"
+AGENT=$(grep -E '^AGENT_EMAIL=' .env | cut -d= -f2 | awk '{print $1}'); AGENT="${AGENT:-agent@taska.local}"
 PASS=123456
 
 echo "1/4 хеш пароля"
