@@ -1,16 +1,14 @@
 // Собственно агент: разговор человека в Телеграме → инструменты поверх API Таски.
-// Модель — OpenAI (Responses API), петлю ведём вручную: видно, что происходит на каждом шаге.
-import OpenAI from 'openai';
+// Петлю ведём вручную: видно, что происходит на каждом шаге. Саму нейросеть (OpenAI, Claude или Kimi)
+// выбирает llm.ts по строке AI_PROVIDER в .env — агент от неё не зависит.
 import { api, isoDay, weekdayOf, dayOf, type Task } from './taska.ts';
+import { engine, PROVIDER, VOICE_READY, type FnTool, type ToolOut } from './llm.ts';
 
-export const MODEL_READY = !!process.env.OPENAI_API_KEY;   // без ключа модели агент молчит, но привязка работает
-let _client: OpenAI | null = null;
-const client = (): OpenAI => (_client ||= new OpenAI());   // лениво: без ключа модуль не должен падать при загрузке
-const MODEL = process.env.AGENT_MODEL || 'gpt-5';
-const MAX_STEPS = 8;
-const DEBUG = process.env.AGENT_DEBUG === '1';   // AGENT_DEBUG=1 — печатать в журнал вызовы инструментов                // столько раз подряд агент может взяться за инструмент
+export { MODEL_READY } from './llm.ts';   // без ключа модели агент молчит, но привязка работает
+const MAX_STEPS = 8;                             // столько раз подряд агент может взяться за инструмент
+const DEBUG = process.env.AGENT_DEBUG === '1';   // AGENT_DEBUG=1 — печатать в журнал вызовы инструментов
 
-const tools: any[] = [
+const tools: FnTool[] = [
   {
     type: 'function',
     name: 'list_tasks',
@@ -201,26 +199,33 @@ async function runTool(name: string, input: any, tgId: string): Promise<string> 
   }
 }
 
-function systemPrompt(userName: string): string {
+// search — есть ли сейчас поиск в интернете (у Claude его может выключить администратор, у Kimi он бывает недоступен).
+function systemPrompt(userName: string, search: boolean): string {
   const now = new Date();
   return [
     `Ты — помощник по задачам в планировщике «Таска». Пишешь в Телеграме с человеком по имени ${userName}.`,
-    `Сегодня ${isoDay(now)}, ${weekdayOf(now)}.`,
+    // У OpenAI — как было. Claude и Kimi сохраняют «размышления» между ходами, и смена system посреди
+    // разговора (новая дата в полночь) ломает историю — им дата приходит в каждом сообщении человека.
+    PROVIDER === 'openai'
+      ? `Сегодня ${isoDay(now)}, ${weekdayOf(now)}.`
+      : 'Сегодняшняя дата стоит в начале каждого сообщения человека в квадратных скобках — считай даты от неё.',
     '',
     'Что ты умеешь (и только это):',
     '- показывать задачи человека за день или период, искать их по слову;',
     '- создавать задачу (название, день, время, описание, метки из уже заведённых);',
     '- вешать и снимать метки у уже существующей задачи — из тех, что заведены в Таске;',
     '- переносить задачу на другой день, менять время и название, снимать время;',
-    '- понимать голосовые: я расшифровываю запись в текст и работаю по ней;',
+    ...(VOICE_READY ? ['- понимать голосовые: я расшифровываю запись в текст и работаю по ней;'] : []),
     '- завершать задачу — она уходит в архив;',
-    '- искать в интернете, если вопрос не про задачи.',
+    ...(search ? ['- искать в интернете, если вопрос не про задачи.'] : []),
     '',
     'Чего ты НЕ умеешь — так и говори прямо, не придумывай обходных путей:',
     '- прикладывать файлы и картинки К ЗАДАЧЕ как вложение (это человек делает сам в Таске);',
     '- заводить новые метки (их создаёт администратор в Таске), назначать задачу на другого человека,',
     '  ставить напоминания и будильники, писать кому-то ещё, работать с почтой и календарями;',
     '- удалять задачи и возвращать их из архива;',
+    ...(VOICE_READY ? [] : ['- слушать голосовые сообщения: попроси написать текстом;']),
+    ...(search ? [] : ['- искать в интернете;']),
     '- обходить права Таски: наблюдатель задачи не создаёт и не меняет, а завершить задачу может только',
     '  её ответственный. Пришёл отказ «в Таске на это нет прав» — так и скажи, это не поломка.',
     '',
@@ -243,7 +248,7 @@ function systemPrompt(userName: string): string {
   ].join('\n');
 }
 
-export type Turn = any;   // элемент истории Responses API: сообщение, вызов инструмента или его результат
+export type Turn = any;   // элемент истории: у OpenAI — Responses API, у Claude — Messages API, у Kimi — chat completions
 
 // Один ход разговора: история + новое сообщение → ответ человеку (историю дополняем на месте).
 // Что агент успел сделать за ход — чтобы при обрыве честно сказать об этом человеку.
@@ -254,36 +259,43 @@ const DONE_WORDS: Record<string, string> = {
   set_task_tags: 'поменял метки',
 };
 
-export async function answer(history: Turn[], userText: string, tgId: string, userName: string): Promise<TurnResult> {
-  history.push({ role: 'user', content: userText });
-  const did: string[] = [];          // только то, что РЕАЛЬНО отработало без ошибки
+// signal — ход вышел за время (index.ts ждёт 90 с). Без него старый ход доделывался бы «в фоне»: создавал
+// задачи и дописывал историю уже после ответа «долго не могу» — получались дубли и запутанный разговор
+// (замечание критика 12.11.2026). did — общий список сделанного: его видит и тот, кто прервал ход.
+export class Aborted extends Error { constructor() { super('ТАЙМАУТ'); } }
+
+export async function answer(history: Turn[], userText: string, tgId: string, userName: string,
+  opts: { signal?: AbortSignal; did?: string[] } = {}): Promise<TurnResult> {
+  const { signal } = opts;
+  const stop = () => { if (signal?.aborted) throw new Aborted(); };
+  const llm = engine();
+  await llm.prepare();
+  const instructions = systemPrompt(userName, llm.search);   // один раз на ход: внутри хода system не меняется
+  llm.begin(history, userText, new Date());
+  const did: string[] = opts.did || [];   // только то, что РЕАЛЬНО отработало без ошибки
   let reply = '';
   let truncated = false;
   for (let step = 0; step < MAX_STEPS; step++) {
-    const res = await client().responses.create({
-      model: MODEL,
-      instructions: systemPrompt(userName),
-      input: history as any,
-      tools: [...tools, { type: 'web_search' }],   // плюс поиск в интернете, когда вопрос не про задачи
-      store: false,                               // переписку держим у себя, на стороне модели не храним
-    });
-    const out: any[] = (res as any).output || [];
-    const status = String((res as any).status || '');
-    if (DEBUG) console.error('[шаг ' + step + '] ' + out.map((o) => o?.type + (o?.name ? ':' + o.name : '')).join(', ')
-      + ' | текст: ' + JSON.stringify(String((res as any).output_text || '').slice(0, 200))
-      + ' | статус: ' + status + ' | причина: ' + JSON.stringify((res as any).incomplete_details || null));
-    reply = String((res as any).output_text || '').trim();   // берём текст ТОЛЬКО этого шага: старое обещание — не ответ
-    history.push(...(out as any[]));              // ответ модели целиком — он же контекст следующего шага
-    if (status === 'incomplete') truncated = true;
-    const calls = out.filter((o) => o?.type === 'function_call');
-    if (!calls.length) break;
-    for (const c of calls) {
+    stop();
+    const res = await llm.step(history, instructions, tools, signal);
+    stop();
+    if (DEBUG) console.error('[шаг ' + step + '] ' + res.trace + ' | текст: ' + JSON.stringify(res.text.slice(0, 200)));
+    reply = res.text;                // берём текст ТОЛЬКО этого шага: старое обещание — не ответ
+    if (res.incomplete) truncated = true;
+    if (!res.calls.length) break;
+    const outs: ToolOut[] = [];
+    for (const c of res.calls) {
       let result: string;
       let ok = false;
+      stop();                                      // следующее действие в Таске после таймаута уже не делаем
       try {
-        const args = c.arguments ? JSON.parse(c.arguments) : {};
-        result = await runTool(c.name, args, tgId);
-        ok = !result.startsWith('ошибка:') && !result.includes('"ошибка"');
+        const own = await llm.own(c, signal);              // поиск Kimi исполняет сама нейросеть, а не Таска
+        if (own !== null) result = own;
+        else {
+          const args = c.args ? JSON.parse(c.args) : {};
+          result = await runTool(c.name, args, tgId);
+          ok = !result.startsWith('ошибка:') && !result.includes('"ошибка"');
+        }
       } catch (e) {
         result = `ошибка: ${(e as Error).message}`;
       }
@@ -292,9 +304,11 @@ export async function answer(history: Turn[], userText: string, tgId: string, us
         try { const r = JSON.parse(result); const t: any = r.создана || r.изменена || r.завершена; if (t?.название) what = ` «${t.название}»` + (t.день ? ` на ${t.день}` : ''); } catch { /* не страшно */ }
         did.push(DONE_WORDS[c.name] + what);
       }
-      if (DEBUG) console.error('   → ' + c.name + '(' + String(c.arguments).slice(0, 120) + ') = ' + result.slice(0, 200));
-      history.push({ type: 'function_call_output', call_id: c.call_id, output: result } as any);
+      if (DEBUG) console.error('   → ' + c.name + '(' + String(c.args).slice(0, 120) + ') = ' + result.slice(0, 200));
+      outs.push({ call: c, output: result });
     }
+    stop();
+    llm.results(history, outs);
     if (step === MAX_STEPS - 1) truncated = true;   // вышли по счётчику: модель не успела подвести итог
   }
   if (!reply) {
