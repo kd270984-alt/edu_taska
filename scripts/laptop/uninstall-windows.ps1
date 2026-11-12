@@ -10,38 +10,59 @@ $Dest = if ($env:TASKA_BACKUP_DIR) { $env:TASKA_BACKUP_DIR } else { Join-Path $e
 $App = if ($env:TASKA_APP_DIR) { $env:TASKA_APP_DIR } else { Join-Path $env:USERPROFILE '.taska-backup' }
 $TaskName = if ($env:TASKA_TASK_NAME) { $env:TASKA_TASK_NAME } else { 'TaskaBackup' }
 
-# Идущий запуск копии (проверка на Windows 12.11.2026): Планировщик останавливает только conhost --headless, а
-# powershell с taska-backup.ps1 и его ssh/scp/sftp продолжают работать. Находим их по записи блокировки и по
-# командной строке (только наши скрипты из этой папки) и гасим вместе с дочерними процессами.
+# Идущий запуск копии (проверка на Windows 12.11.2026): Планировщик останавливает только корневой процесс задачи
+# (conhost --headless или powershell), а остальное — powershell с taska-backup.ps1, его ssh/scp/sftp — продолжает
+# работать. Поэтому гасим САМИ и ДО остановки задачи, пока дерево процессов цело: powershell с нашим скриптом из
+# этой папки (и запуск из блокировки) — вместе с дочерними; scp, пишущий в папку копий, — тоже. Предков текущего
+# процесса (оболочку, из которой запустили установщик) не трогаем. Нет WMI — только процесс из блокировки, если это
+# PowerShell, запущенный не позже блокировки. Недокачанные копии базы (.part-*) остановленных запусков — убираем.
 function Stop-Running([string]$AppDir, [string]$DestDir) {
-  $ids = New-Object System.Collections.Generic.List[int]
+  $lockPid = 0; $lockAt = [int64]0
   try {
-    $first = (([IO.File]::ReadAllText((Join-Path $DestDir '.state\lock\info'))).Trim() -split ' ')[0]
-    if ($first -match '^\d+$') { $ids.Add([int]$first) }
+    $parts = ([IO.File]::ReadAllText((Join-Path $DestDir '.state\lock\info'))).Trim() -split ' '
+    if ($parts[0] -match '^\d+$') { $lockPid = [int]$parts[0] }
+    if ($parts.Count -gt 1 -and $parts[1] -match '^\d+$') { $lockAt = [int64]$parts[1] }
   } catch {}
-  $procs = @()
-  try { $procs = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction Stop) } catch {}
-  $app = $AppDir.TrimEnd('\').ToLowerInvariant()
-  foreach ($p in $procs) {
-    $cl = [string]$p.CommandLine
-    if ($p.ProcessId -ne $PID -and $cl -and $cl.ToLowerInvariant().Contains($app) -and $cl -match 'taska-backup\.ps1|test-run\.ps1') { $ids.Add([int]$p.ProcessId) }
+  $procs = $null
+  try { $procs = @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch {}
+  $app = $AppDir.TrimEnd('\').ToLowerInvariant(); $dst = $DestDir.TrimEnd('\').ToLowerInvariant()
+  $ids = New-Object System.Collections.Generic.List[int]
+  if ($procs) {
+    $mine = @{}; $cur = $PID
+    for ($i = 0; $i -lt 32 -and $cur; $i++) {
+      $mine[[int]$cur] = $true
+      $pp = $procs | Where-Object { $_.ProcessId -eq $cur } | Select-Object -First 1
+      if (-not $pp) { break }; $cur = [int]$pp.ParentProcessId
+    }
+    foreach ($p in $procs) {
+      $id = [int]$p.ProcessId
+      if ($mine.ContainsKey($id)) { continue }
+      $cl = ([string]$p.CommandLine).ToLowerInvariant(); if (-not $cl) { continue }
+      $n = ([string]$p.Name).ToLowerInvariant()
+      $ours = $cl -match 'taska-backup\.ps1|test-run\.ps1'
+      if ($n -in @('powershell.exe', 'pwsh.exe') -and $ours -and ($cl.Contains($app) -or $id -eq $lockPid)) { $ids.Add($id) }
+      elseif ($n -eq 'scp.exe' -and $cl.Contains($dst)) { $ids.Add($id) }
+    }
+  } elseif ($lockPid -and $lockPid -ne $PID) {
+    $gp = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+    if ($gp -and $gp.ProcessName -in @('powershell', 'pwsh')) {
+      try { if ($lockAt -and ([DateTimeOffset]$gp.StartTime).ToUnixTimeSeconds() -le $lockAt + 5) { $ids.Add($lockPid) } } catch {}
+    }
   }
   $killed = 0
-  foreach ($id in ($ids | Select-Object -Unique)) {
-    if ($id -eq $PID) { continue }
-    $p = $procs | Where-Object { $_.ProcessId -eq $id } | Select-Object -First 1
-    if (-not $p -or [string]$p.CommandLine -notmatch 'taska-backup\.ps1|test-run\.ps1') { continue }   # PID из блокировки мог достаться чужому процессу
-    & "$env:WINDIR\System32\taskkill.exe" /PID $id /T /F 2>&1 | Out-Null; $killed++
-  }
+  foreach ($id in ($ids | Select-Object -Unique)) { & "$env:WINDIR\System32\taskkill.exe" /PID $id /T /F 2>&1 | Out-Null; $killed++ }
   if ($killed) { Start-Sleep -Milliseconds 700 }
+  Get-ChildItem -LiteralPath $DestDir -Force -Filter '.part-*.sql.gz' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
   return $killed
 }
 
+# идущий запуск — до остановки задачи и до уборки, иначе он вернёт отметки на сервер
+[void](Stop-Running $App $Dest)
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 }
-[void](Stop-Running $App $Dest)   # идущий запуск — до уборки, иначе он вернёт отметки на сервер
+[void](Stop-Running $App $Dest)   # на случай, если задача успела стартовать между проверками
 Remove-Item -LiteralPath $App -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $Dest '.state\lock') -Recurse -Force -ErrorAction SilentlyContinue
 # «сегодня отметка уже ставилась» — забываем: переустановка в тот же день поставит отметки на сервер заново

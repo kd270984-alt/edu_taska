@@ -152,6 +152,8 @@ if (-not (Take-Lock)) {
   } else { Log 'копия уже идёт другим запуском — этот пропускаю'; exit 0 }
 }
 $PartName = ".part-$PID.sql.gz"
+# недокачанные копии прошлых запусков (остановлены, выключение, предел Планировщика) — под блокировкой убираем
+Get-ChildItem -LiteralPath $Dest -Force -Filter '.part-*.sql.gz' -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $PartName } | Remove-Item -Force -ErrorAction SilentlyContinue
 
 function Finish([int]$code) {
   Remove-Item -LiteralPath (Join-Path $Dest $PartName) -Force -ErrorAction SilentlyContinue

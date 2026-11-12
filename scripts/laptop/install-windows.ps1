@@ -119,30 +119,49 @@ Say 'сервер на связи, ночные копии на нём есть'
 try { $free = (New-Object IO.DriveInfo ([IO.Path]::GetPathRoot($env:USERPROFILE))).AvailableFreeSpace } catch { $free = 2GB }
 if ($free -lt 1GB) { Stop-Install 'на этом компьютере свободно меньше 1 ГБ — освободите место и повторите.' }
 
-# Идущий запуск копии (проверка на Windows 12.11.2026): Планировщик останавливает только conhost --headless, а
-# powershell с taska-backup.ps1 и его ssh/scp/sftp продолжают работать. Находим их по записи блокировки и по
-# командной строке (только наши скрипты из этой папки) и гасим вместе с дочерними процессами.
+# Идущий запуск копии (проверка на Windows 12.11.2026): Планировщик останавливает только корневой процесс задачи
+# (conhost --headless или powershell), а остальное — powershell с taska-backup.ps1, его ssh/scp/sftp — продолжает
+# работать. Поэтому гасим САМИ и ДО остановки задачи, пока дерево процессов цело: powershell с нашим скриптом из
+# этой папки (и запуск из блокировки) — вместе с дочерними; scp, пишущий в папку копий, — тоже. Предков текущего
+# процесса (оболочку, из которой запустили установщик) не трогаем. Нет WMI — только процесс из блокировки, если это
+# PowerShell, запущенный не позже блокировки. Недокачанные копии базы (.part-*) остановленных запусков — убираем.
 function Stop-Running([string]$AppDir, [string]$DestDir) {
-  $ids = New-Object System.Collections.Generic.List[int]
+  $lockPid = 0; $lockAt = [int64]0
   try {
-    $first = (([IO.File]::ReadAllText((Join-Path $DestDir '.state\lock\info'))).Trim() -split ' ')[0]
-    if ($first -match '^\d+$') { $ids.Add([int]$first) }
+    $parts = ([IO.File]::ReadAllText((Join-Path $DestDir '.state\lock\info'))).Trim() -split ' '
+    if ($parts[0] -match '^\d+$') { $lockPid = [int]$parts[0] }
+    if ($parts.Count -gt 1 -and $parts[1] -match '^\d+$') { $lockAt = [int64]$parts[1] }
   } catch {}
-  $procs = @()
-  try { $procs = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction Stop) } catch {}
-  $app = $AppDir.TrimEnd('\').ToLowerInvariant()
-  foreach ($p in $procs) {
-    $cl = [string]$p.CommandLine
-    if ($p.ProcessId -ne $PID -and $cl -and $cl.ToLowerInvariant().Contains($app) -and $cl -match 'taska-backup\.ps1|test-run\.ps1') { $ids.Add([int]$p.ProcessId) }
+  $procs = $null
+  try { $procs = @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch {}
+  $app = $AppDir.TrimEnd('\').ToLowerInvariant(); $dst = $DestDir.TrimEnd('\').ToLowerInvariant()
+  $ids = New-Object System.Collections.Generic.List[int]
+  if ($procs) {
+    $mine = @{}; $cur = $PID
+    for ($i = 0; $i -lt 32 -and $cur; $i++) {
+      $mine[[int]$cur] = $true
+      $pp = $procs | Where-Object { $_.ProcessId -eq $cur } | Select-Object -First 1
+      if (-not $pp) { break }; $cur = [int]$pp.ParentProcessId
+    }
+    foreach ($p in $procs) {
+      $id = [int]$p.ProcessId
+      if ($mine.ContainsKey($id)) { continue }
+      $cl = ([string]$p.CommandLine).ToLowerInvariant(); if (-not $cl) { continue }
+      $n = ([string]$p.Name).ToLowerInvariant()
+      $ours = $cl -match 'taska-backup\.ps1|test-run\.ps1'
+      if ($n -in @('powershell.exe', 'pwsh.exe') -and $ours -and ($cl.Contains($app) -or $id -eq $lockPid)) { $ids.Add($id) }
+      elseif ($n -eq 'scp.exe' -and $cl.Contains($dst)) { $ids.Add($id) }
+    }
+  } elseif ($lockPid -and $lockPid -ne $PID) {
+    $gp = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+    if ($gp -and $gp.ProcessName -in @('powershell', 'pwsh')) {
+      try { if ($lockAt -and ([DateTimeOffset]$gp.StartTime).ToUnixTimeSeconds() -le $lockAt + 5) { $ids.Add($lockPid) } } catch {}
+    }
   }
   $killed = 0
-  foreach ($id in ($ids | Select-Object -Unique)) {
-    if ($id -eq $PID) { continue }
-    $p = $procs | Where-Object { $_.ProcessId -eq $id } | Select-Object -First 1
-    if (-not $p -or [string]$p.CommandLine -notmatch 'taska-backup\.ps1|test-run\.ps1') { continue }   # PID из блокировки мог достаться чужому процессу
-    & "$env:WINDIR\System32\taskkill.exe" /PID $id /T /F 2>&1 | Out-Null; $killed++
-  }
+  foreach ($id in ($ids | Select-Object -Unique)) { & "$env:WINDIR\System32\taskkill.exe" /PID $id /T /F 2>&1 | Out-Null; $killed++ }
   if ($killed) { Start-Sleep -Milliseconds 700 }
+  Get-ChildItem -LiteralPath $DestDir -Force -Filter '.part-*.sql.gz' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
   return $killed
 }
 
@@ -155,9 +174,11 @@ if ($r.Code -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $tmp 'laptop\taska
   Stop-Install "не скачались скрипты с сервера. $(($r.Err -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1))"
 }
 # старая задача — остановить ДО первой копии, чтобы не было двух запусков сразу; идущий запуск — тоже
+$stopped = Stop-Running $App $Dest   # до остановки задачи, пока дерево процессов цело
 $old = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($old) { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue; Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Out-Null }
-if ((Stop-Running $App $Dest) -gt 0) { Say 'остановил идущую копию старой версии — она продолжится уже новой' }
+$stopped += Stop-Running $App $Dest
+if ($stopped -gt 0) { Say 'остановил идущую копию — новая установка сделает её заново' }
 try {
   New-Item -ItemType Directory -Force -Path $App, (Join-Path $Dest '.state') -ErrorAction Stop | Out-Null
   Copy-Item -Path (Join-Path $tmp 'laptop\*') -Destination $App -Force -ErrorAction Stop
@@ -262,7 +283,7 @@ if (-not $ok -and ([DateTimeOffset]::Now.ToUnixTimeSeconds() - $T1) -lt 55) {
   [Console]::Out.WriteLine("ПОСТАВЛЕНО, НО НЕ ПРОВЕРЕНО: задача $TaskName в Планировщике стоит, а проверить её первый запуск не хватило времени (медленная связь). Ничего не чините: через 5 минут откройте $Dest\Последняя копия.txt — там должна быть свежая «Последняя проверка».")
   exit 4
 }
-if (-not $ok) { Stop-Install "задача поставлена, но её запуск не прошёл за минуту. Откройте $Dest\журнал.txt и «Последняя копия.txt» в той же папке и покажите помощнику последние строки." }
+if (-not $ok) { Stop-Install "задача поставлена, но её запуск не прошёл за минуту. Откройте $Dest\журнал.txt: нет строк за сегодня — задачу не пускает антивирус или политика рабочего компьютера: поставьте копию с -Window visible (README) или держите её вручную; строки есть — покажите помощнику последние и «Последняя копия.txt» из той же папки." }
 Say 'задача в Планировщике стоит и сработала: каждый час, при входе в Windows и сразу после сна'
 
 # ---------- итог ----------
