@@ -2,33 +2,47 @@
 // Главное правило: человек получает ответ ВСЕГДА — даже когда Таска легла, модель молчит,
 // а сообщение пришло картинкой, стикером или голосом.
 import { api, API } from './taska.ts';
-import { answer, MODEL_READY, type Turn } from './agent.ts';
-import { attachmentKind, noTextReply, attachmentNote } from './msgkind.ts';
+import { answer, type Turn } from './agent.ts';
+import {
+  MODEL_READY, KEY_VAR, PROVIDER, PROVIDER_NAME, MODEL, VOICE_READY, VOICE_KEY,
+  checkModel, errKind, humanError, logError,
+} from './llm.ts';
+import { attachmentKind, noTextReply, attachmentNote, voiceOffReply } from './msgkind.ts';
 import { transcribeTelegramFile } from './stt.ts';
 import { chunks, trimHistory, TG_LIMIT } from './parts.ts';
+import { botStatus, TG_API } from './status.ts';
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
-const TG = `https://api.telegram.org/bot${TOKEN}`;
-const VOICE_ON = (process.env.AGENT_VOICE || 'on') !== 'off';
+const TG = `${TG_API}/bot${TOKEN}`;
 const HISTORY_TURNS = 8;           // сколько последних ходов разговора помним
 const TURN_TIMEOUT_MS = 90_000;    // столько ждём модель, дальше — честно признаёмся
+// Первый опрос Телеграма — короткий. Портал ждёт «poll=ok», а длинный опрос (50 с) без сообщений
+// вернулся бы только через 50 с. И короче нельзя: второй экземпляр бота (старый сервер с тем же токеном)
+// повторяет опрос раз в несколько секунд — за 10 с он успевает перебить наш, и мы честно видим 409.
+const FIRST_POLL_S = 10;
 
 const histories = new Map<string, Turn[]>();
 const queues = new Map<string, Promise<void>>();   // по одному ходу на человека: иначе история перемешается
 const groupWarned = new Set<number>();
 
 if (!TOKEN) {
+  botStatus('telegram=fail', 'code=bad_token');
   console.error('TELEGRAM_BOT_TOKEN не задан. Возьмите токен у @BotFather и впишите его в .env');
   process.exit(1);
 }
 process.on('unhandledRejection', (e) => console.error('необработанный сбой:', e));
+
+// Ошибка Телеграма с его кодом: 401/404 на getMe — неверный токен, 409 на getUpdates — второй экземпляр.
+class TgError extends Error {
+  constructor(message: string, readonly code: number) { super(message); }
+}
 
 async function tg<T = any>(method: string, body: unknown): Promise<T> {
   const r = await fetch(`${TG}/${method}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
   const d = await r.json().catch(() => ({}) as any);
-  if (!d.ok) throw new Error(`Телеграм: ${d.description || r.status}`);
+  if (!d.ok) throw new TgError(`Телеграм: ${d.description || r.status}`, Number(d.error_code || r.status) || 0);
   return d.result as T;
 }
 
@@ -49,7 +63,7 @@ async function send(chatId: number | string, text: string): Promise<void> {
 const HELP = [
   'Я помогаю с задачами в Таске прямо здесь.',
   '',
-  'Можно просто писать словами или надиктовать голосом:',
+  VOICE_READY ? 'Можно просто писать словами или надиктовать голосом:' : 'Можно просто писать словами:',
   '• что у меня сегодня?',
   '• добавь задачу «позвонить клиенту» на завтра в 11',
   '• перенеси смету на пятницу',
@@ -66,33 +80,39 @@ const LINK_HELP = [
   'Там появится код из шести цифр — пришлите его мне сюда.',
 ].join('\n');
 
-async function runTurn(chatId: number, tgId: string, name: string, text: string, kind: string, heard: string): Promise<void> {
+async function runTurn(chatId: number, tgId: string, name: string, text: string, kind: string, heard: string, note = ''): Promise<void> {
   const history = histories.get(tgId) || [];
   const typing = setInterval(() => { void tg('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {}); }, 4500);
   void tg('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
   const heardLine = heard ? 'Расслышал: «' + heard + '»\n\n' : '';
+  let reset = false;
   try {
     const res = await Promise.race([
       answer(history, text, tgId, name),
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error('ТАЙМАУТ')), TURN_TIMEOUT_MS)),
     ]);
-    await send(chatId, heardLine + res.reply + (kind ? attachmentNote(kind) : ''));
+    await send(chatId, heardLine + res.reply + (kind ? attachmentNote(kind) : '') + note);
   } catch (e) {
     const msg = (e as Error).message || '';
-    const done = (history as any[]).length ? '' : '';
+    // Нейросеть ответила ошибкой — называем причину словами: «нет денег», «ключ не подошёл», «страна».
+    // Раньше нехватка денег выдавалась за «лимит запросов, попробуйте через минуту» — и человек ждал зря.
+    const kind = msg === 'ТАЙМАУТ' ? null : errKind(e);
     let human: string;
     if (msg === 'ТАЙМАУТ') human = 'Долго не могу получить ответ модели. Повторите просьбу, пожалуйста.';
-    else if (/No tool call found|Invalid value|previous response/i.test(msg)) {
-      histories.delete(tgId);
+    else if (kind === 'history' || /No tool call found|Invalid value|previous response/i.test(msg)) {
+      reset = true;
       human = 'Разговор запутался, я начал его заново. Повторите последнюю просьбу.';
-    } else if (/Таска|не отвечает|прав|задачи в Таске нет/i.test(msg)) human = 'Не вышло: ' + msg + '.';
-    else if (/rate limit|429|quota|billing/i.test(msg)) human = 'Модель сейчас не отвечает (лимит запросов). Попробуйте через минуту.';
-    else human = 'Что-то сломалось на моей стороне. Попробуйте ещё раз, а если повторится — скажите владельцу.';
-    console.error('ход агента:', msg, done);
+    } else if (kind && kind !== 'other') human = humanError(kind);
+    else if (/Таска|не отвечает|прав|задачи в Таске нет/i.test(msg)) human = 'Не вышло: ' + msg + '.';
+    else if (/rate limit|429|quota|billing/i.test(msg)) human = humanError('rate');
+    else human = humanError('other');
+    console.error('ход агента:', kind ? logError(kind, e) : msg);
     await send(chatId, heardLine + human);
   } finally {
     clearInterval(typing);
-    histories.set(tgId, trimHistory(history, HISTORY_TURNS));   // ход мог оборваться — историю всё равно приводим в порядок
+    // ⚠️ Раньше «начал заново» не срабатывало: catch удалял историю, а finally тут же клал её обратно.
+    if (reset) histories.delete(tgId);
+    else histories.set(tgId, trimHistory(history, HISTORY_TURNS));   // ход мог оборваться — историю всё равно приводим в порядок
   }
 }
 
@@ -139,12 +159,24 @@ async function handle(m: any): Promise<void> {
   if (cmd === '/reset' || cmd === 'забудь') { histories.delete(tgId); await send(chatId, 'Разговор начат заново.'); return; }
   if (cmd.startsWith('/')) { await send(chatId, 'Такой команды у меня нет.\n\n' + HELP); return; }
 
-  // 3) голос → текст (подпись, если она есть, оставляем рядом)
-  const voiceId = VOICE_ON ? (m.voice?.file_id || m.audio?.file_id || m.video_note?.file_id) : null;
+  // 3) ключа нейросети нет — понимать просьбы нечем. Говорим это ДО распознавания речи: оно платное.
+  if (!MODEL_READY) {
+    await send(chatId, `Связь с Таской есть, а ключ нейросети ${PROVIDER_NAME} не задан — понимать просьбы пока нечем.\n`
+      + `Впишите ${KEY_VAR} в .env и перезапустите бота: docker compose --profile bot up -d --force-recreate bot`);
+    return;
+  }
+
+  // 4) голос → текст (подпись, если она есть, оставляем рядом). Речь распознаёт только OpenAI.
+  const voiceId = m.voice?.file_id || m.audio?.file_id || m.video_note?.file_id || null;
   let body = rawText;
   let heard = '';
   let kind = attachmentKind(m);
-  if (voiceId) {
+  let note = '';
+  if (voiceId && !VOICE_READY) {
+    if (!rawText) { await send(chatId, voiceOffReply(VOICE_KEY)); return; }
+    kind = '';                       // подпись к записи выполним, а про саму запись скажем честно
+    note = '\n\n(Саму запись я не слушал. ' + voiceOffReply(VOICE_KEY) + ')';
+  } else if (voiceId) {
     void tg('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
     try {
       heard = await transcribeTelegramFile(voiceId, TOKEN);
@@ -157,13 +189,8 @@ async function handle(m: any): Promise<void> {
     kind = '';                       // голосовое — это речь, а не вложение к задаче
   }
 
-  if (!MODEL_READY) {
-    await send(chatId, 'Связь с Таской есть, а ключ модели не задан — понимать просьбы пока нечем.\n'
-      + 'Впишите OPENAI_API_KEY в .env и перезапустите бота: docker compose --profile bot up -d --force-recreate bot');
-    return;
-  }
-  if (!body) { await send(chatId, noTextReply(kind)); return; }   // стикер, картинка без подписи и прочее
-  await runTurn(chatId, tgId, name, body, kind, heard);
+  if (!body) { await send(chatId, noTextReply(kind, VOICE_READY)); return; }   // стикер, картинка без подписи и прочее
+  await runTurn(chatId, tgId, name, body, kind, heard, note);
 }
 
 // По одному ходу на человека: сообщения, пришедшие подряд, обрабатываем по очереди.
@@ -185,12 +212,34 @@ async function main(): Promise<void> {
     try { me = await tg<{ username: string }>('getMe', {}); }
     catch (e) {
       const msg = (e as Error).message;
-      if (/401|unauthorized|token/i.test(msg)) { console.error('Токен бота неверный:', msg); process.exit(1); }
+      // 401 — токен отозван или чужой; 404 — в токене опечатка, и Телеграм не находит такого бота вовсе
+      if ((e instanceof TgError && (e.code === 401 || e.code === 404)) || /401|unauthorized|token/i.test(msg)) {
+        botStatus('telegram=fail', 'code=bad_token');
+        console.error('Токен бота неверный:', msg);
+        process.exit(1);
+      }
       console.error(`Телеграм не отвечает (${msg}), повтор через 10 с`);
       await new Promise((r) => setTimeout(r, 10_000));
     }
   }
+  botStatus('telegram=ok', `bot=@${me.username}`);
   console.log(`бот @${me.username} слушает личные сообщения`);
+
+  // Нейросеть проверяем сразу: ключ, деньги, страна. Не вышло — говорим, но работаем дальше
+  // (привязка и команды не нужны нейросети), а на просьбы человек получит понятную причину.
+  const check = await checkModel();
+  if (check.ok) {
+    botStatus('model=ok', `provider=${PROVIDER}`, `model=${MODEL}`);
+    console.log(`нейросеть ${PROVIDER_NAME} (${MODEL}) отвечает`);
+  } else {
+    botStatus('model=fail', `provider=${PROVIDER}`, `code=${check.code}`);
+    console.error('НЕЙРОСЕТЬ НЕ ОТВЕЧАЕТ:', check.why);
+  }
+  botStatus(`voice=${VOICE_READY ? 'on' : 'off'}`);
+  if (!VOICE_READY) {
+    console.log(VOICE_KEY ? 'голосовые выключены (AGENT_VOICE=off)' : 'голосовые выключены: их распознаёт только OpenAI, а OPENAI_API_KEY в .env нет');
+  }
+
   // Связь с Таской проверяем СРАЗУ, а не при первом сообщении. Иначе в журнале стоит бодрое
   // «слушает сообщения», а человек в Телеграме получает «Таска сейчас не отвечает» — и ищи причину.
   // Заодно проверяется пароль учётки агента: api() перед запросом входит в Таску.
@@ -216,9 +265,15 @@ async function main(): Promise<void> {
   }
 
   let offset = 0;
+  let first = true;
+  let polled = '';                 // что последним сказали порталу про опрос: '' | 'ok' | 'twin'
   for (;;) {
     try {
-      const updates = await tg<any[]>('getUpdates', { offset, timeout: 50, allowed_updates: ['message', 'edited_message'] });
+      const updates = await tg<any[]>('getUpdates', {
+        offset, timeout: first ? FIRST_POLL_S : 50, allowed_updates: ['message', 'edited_message'],
+      });
+      first = false;
+      if (polled !== 'ok') { botStatus('poll=ok'); polled = 'ok'; }
       for (const u of updates) {
         offset = u.update_id + 1;
         const m = u.message || u.edited_message;
@@ -238,8 +293,11 @@ async function main(): Promise<void> {
       }
     } catch (e) {
       const msg = (e as Error).message;
-      if (/409|terminated by other getUpdates/i.test(msg)) console.error('Похоже, где-то запущен второй экземпляр бота:', msg);
-      else console.error('опрос Телеграма:', msg);
+      // 409 — этот же токен опрашивает кто-то ещё: обычно старый сервер ученика, где бот ещё работает
+      if ((e instanceof TgError && e.code === 409) || /409|terminated by other getUpdates/i.test(msg)) {
+        if (polled !== 'twin') { botStatus('poll=fail', 'code=twin'); polled = 'twin'; }
+        console.error('Похоже, где-то запущен второй экземпляр бота:', msg);
+      } else console.error('опрос Телеграма:', msg);
       await new Promise((r) => setTimeout(r, 5000));
     }
   }

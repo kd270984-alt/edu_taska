@@ -9,10 +9,17 @@
     "trybot": "tsx src/trybot.ts",
     "checkmsg": "tsx src/checkmsg.ts",
     "tryvoice": "tsx src/tryvoice.ts",
-    "checkparts": "tsx src/checkparts.ts"
+    "checkparts": "tsx src/checkparts.ts",
+    "checkproviders": "tsx src/checkproviders.ts",
+    "typecheck": "tsc -p ."
   },
   "dependencies": {
-    "tsx": "^4.19.1",
-    "openai": "^4.104.0"
+    "@anthropic-ai/sdk": "1.3.0",
+    "openai": "^4.104.0",
+    "tsx": "^4.19.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3"
   }
 }

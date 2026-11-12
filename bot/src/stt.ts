@@ -1,6 +1,8 @@
 // Распознавание голосовых: Телеграм отдаёт файл записи по ссылке, OpenAI переводит его в текст.
+// Только ключом OpenAI — при любой нейросети для текста (у Claude и Kimi распознавания речи нет).
 // Отдельный модуль без сети Таски — чтобы можно было проверить на готовом файле.
 import OpenAI from 'openai';
+import { TG_API } from './status.ts';
 
 let _client: OpenAI | null = null;
 const client = (): OpenAI => (_client ||= new OpenAI());   // лениво: без ключа модуль не должен падать при загрузке
@@ -15,14 +17,14 @@ export async function transcribeBuffer(data: Uint8Array, filename: string): Prom
 
 // file_id из Телеграма → текст. Бросает понятную ошибку, если запись слишком большая или её не отдали.
 export async function transcribeTelegramFile(fileId: string, botToken: string): Promise<string> {
-  const info = await fetch(`https://api.telegram.org/bot${botToken}/getFile`, {
+  const info = await fetch(`${TG_API}/bot${botToken}/getFile`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file_id: fileId }),
   }).then((r) => r.json() as Promise<any>);
   if (!info.ok) throw new Error('Телеграм не отдал запись: ' + (info.description || 'причина неизвестна'));
   const size = Number(info.result.file_size || 0);
   if (size > MAX_BYTES) throw new Error('Запись слишком длинная — пришлите покороче или напишите текстом');
   const path = String(info.result.file_path || '');
-  const res = await fetch(`https://api.telegram.org/file/bot${botToken}/${path}`);
+  const res = await fetch(`${TG_API}/file/bot${botToken}/${path}`);
   if (!res.ok) throw new Error('не удалось скачать запись из Телеграма');
   const buf = new Uint8Array(await res.arrayBuffer());
   const name = path.split('/').pop() || 'voice.oga';
