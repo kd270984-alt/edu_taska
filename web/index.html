@@ -3702,9 +3702,9 @@ async function renderCrmView(){
 }
 function paintCrm(){
   if(curView!=='crm'||!crmData) return;
-  const {C,D,P}=crmData, empty=!C.length&&!D.length&&!P.length;
   const addLbl={deals:'Сделка',clients:'Клиент',goods:'Товар'}[crmTab];
-  const canAdd=!empty&&(crmTab==='goods'?amAdmin():crmCanWrite());
+  // кнопка «+» есть и в пустой CRM: после clear администратор может начать свою CRM с нуля (находка критика 12.11.2026)
+  const canAdd=crmTab==='goods'?amAdmin():crmCanWrite();
   const ph={deals:'Сделка или клиент…',clients:'Клиент или телефон…',goods:'Товар или категория…'}[crmTab];
   viewHost.innerHTML='<div class="vw-bar crm-bar">'
      +'<div class="vw-seg">'+[['deals','Сделки'],['clients','Клиенты'],['goods','Товары']].map(([k,l])=>'<button data-ct="'+k+'" class="'+(crmTab===k?'on':'')+'">'+l+'</button>').join('')+'</div>'
@@ -3723,9 +3723,12 @@ function paintCrmBody(){
   const host=document.getElementById('crmBody'); if(!host||!crmData) return;
   const {C,D,P}=crmData, q=crmQ.trim().toLowerCase();
   if(!C.length&&!D.length&&!P.length){
-    host.innerHTML='<div class="lempty">В CRM пока пусто.'
-      +(amAdmin()?'<div style="margin-top:14px"><button class="tbtn dark" id="crmDemo">Загрузить пример «Плёнка и Короб»</button></div>'
-                 :'<br>Пример загружает администратор.')+'</div>';
+    host.innerHTML='<div class="lempty">В CRM пока пусто. '
+      +(crmTab==='goods'?(amAdmin()?'Добавьте первый товар кнопкой «Товар» вверху':'')
+        :crmCanWrite()?'Начните с клиента: вкладка «Клиенты», кнопка «Клиент» вверху':'')
+      +(amAdmin()?' — или загрузите готовый пример.':'')
+      +(amAdmin()?'<div style="margin-top:14px"><button class="tbtn" id="crmDemo">Загрузить пример «Плёнка и Короб»</button></div>'
+                 :'<br>Готовый пример загружает администратор.')+'</div>';
     const db=document.getElementById('crmDemo');
     if(db) db.onclick=async()=>{ db.disabled=true;
       try{ const r=await api('/api/crm/demo',{method:'POST',body:'{}'}); showToast('Пример загружен: клиентов '+r.companies+', сделок '+r.deals+', товаров '+r.products, 4000); }
