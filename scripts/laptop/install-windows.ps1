@@ -150,7 +150,8 @@ function Stop-Running([string]$AppDir, [string]$DestDir) {
       $n = ([string]$p.Name).ToLowerInvariant()
       $ours = $cl -match 'taska-backup\.ps1|test-run\.ps1'
       if ($n -in @('powershell.exe', 'pwsh.exe') -and $ours -and ($cl.Contains($app) -or $id -eq $lockPid)) { $ids.Add($id) }
-      elseif ($n -eq 'scp.exe' -and $cl.Contains($dst)) { $ids.Add($id) }
+      elseif ($n -eq 'scp.exe' -and ($cl.Contains($dst) -or $cl -match '/backups/\d{4}-\d{2}-\d{2}\.sql\.gz"?\s+"?\.part-\d+\.sql\.gz')) { $ids.Add($id) }   # сирота: копия базы (путь относительный)
+      elseif ($n -eq 'sftp.exe' -and $cl -match '(^|\s)-b\s+"?batch\.txt') { $ids.Add($id) }   # сирота: докачка файлов задач
     }
   } elseif ($lockPid -and $lockPid -ne $PID) {
     $gp = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
@@ -161,7 +162,12 @@ function Stop-Running([string]$AppDir, [string]$DestDir) {
   $killed = 0
   foreach ($id in ($ids | Select-Object -Unique)) { & "$env:WINDIR\System32\taskkill.exe" /PID $id /T /F 2>&1 | Out-Null; $killed++ }
   if ($killed) { Start-Sleep -Milliseconds 700 }
-  Get-ChildItem -LiteralPath $DestDir -Force -Filter '.part-*.sql.gz' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+  # файл может держаться ещё мгновение после остановки scp — пробуем до 3 с
+  for ($i = 0; $i -lt 6; $i++) {
+    $left = @(Get-ChildItem -LiteralPath $DestDir -Force -Filter '.part-*.sql.gz' -ErrorAction SilentlyContinue)
+    if (-not $left) { break }
+    $left | Remove-Item -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500
+  }
   return $killed
 }
 
@@ -283,7 +289,19 @@ if (-not $ok -and ([DateTimeOffset]::Now.ToUnixTimeSeconds() - $T1) -lt 55) {
   [Console]::Out.WriteLine("ПОСТАВЛЕНО, НО НЕ ПРОВЕРЕНО: задача $TaskName в Планировщике стоит, а проверить её первый запуск не хватило времени (медленная связь). Ничего не чините: через 5 минут откройте $Dest\Последняя копия.txt — там должна быть свежая «Последняя проверка».")
   exit 4
 }
-if (-not $ok) { Stop-Install "задача поставлена, но её запуск не прошёл за минуту. Откройте $Dest\журнал.txt: нет строк за сегодня — задачу не пускает антивирус или политика рабочего компьютера: поставьте копию с -Window visible (README) или держите её вручную; строки есть — покажите помощнику последние и «Последняя копия.txt» из той же папки." }
+if (-not $ok) {
+  # Решаем сами, а не ученик по журналу: запустилась ли задача после постановки (её строки в журнале позже $T1).
+  # Первая копия установщика пишет в журнал раньше — её строки не в счёт (проверка на Windows 12.11.2026).
+  $ran = $false
+  try {
+    $since = [DateTimeOffset]::FromUnixTimeSeconds($T1 - 2).LocalDateTime
+    foreach ($l in [IO.File]::ReadAllLines((Join-Path $Dest 'журнал.txt'))) {
+      if ($l -match '^(\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2}) ' -and [datetime]::ParseExact($Matches[1], 'dd.MM.yyyy HH:mm:ss', $null) -ge $since) { $ran = $true; break }
+    }
+  } catch {}
+  if ($ran) { Stop-Install "задача запустилась, но не дошла до конца за минуту. Откройте $Dest\журнал.txt и «Последняя копия.txt» из той же папки и покажите помощнику последние строки." }
+  Stop-Install "задача поставлена, но Windows её не запустила — похоже, её не пускает антивирус или политика рабочего компьютера. Переустановите копию с -Window visible (README) или держите её вручную (README, «Скачать копию вручную»)."
+}
 Say 'задача в Планировщике стоит и сработала: каждый час, при входе в Windows и сразу после сна'
 
 # ---------- итог ----------

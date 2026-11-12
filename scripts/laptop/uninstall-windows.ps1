@@ -41,7 +41,8 @@ function Stop-Running([string]$AppDir, [string]$DestDir) {
       $n = ([string]$p.Name).ToLowerInvariant()
       $ours = $cl -match 'taska-backup\.ps1|test-run\.ps1'
       if ($n -in @('powershell.exe', 'pwsh.exe') -and $ours -and ($cl.Contains($app) -or $id -eq $lockPid)) { $ids.Add($id) }
-      elseif ($n -eq 'scp.exe' -and $cl.Contains($dst)) { $ids.Add($id) }
+      elseif ($n -eq 'scp.exe' -and ($cl.Contains($dst) -or $cl -match '/backups/\d{4}-\d{2}-\d{2}\.sql\.gz"?\s+"?\.part-\d+\.sql\.gz')) { $ids.Add($id) }   # сирота: копия базы (путь относительный)
+      elseif ($n -eq 'sftp.exe' -and $cl -match '(^|\s)-b\s+"?batch\.txt') { $ids.Add($id) }   # сирота: докачка файлов задач
     }
   } elseif ($lockPid -and $lockPid -ne $PID) {
     $gp = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
@@ -52,7 +53,12 @@ function Stop-Running([string]$AppDir, [string]$DestDir) {
   $killed = 0
   foreach ($id in ($ids | Select-Object -Unique)) { & "$env:WINDIR\System32\taskkill.exe" /PID $id /T /F 2>&1 | Out-Null; $killed++ }
   if ($killed) { Start-Sleep -Milliseconds 700 }
-  Get-ChildItem -LiteralPath $DestDir -Force -Filter '.part-*.sql.gz' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+  # файл может держаться ещё мгновение после остановки scp — пробуем до 3 с
+  for ($i = 0; $i -lt 6; $i++) {
+    $left = @(Get-ChildItem -LiteralPath $DestDir -Force -Filter '.part-*.sql.gz' -ErrorAction SilentlyContinue)
+    if (-not $left) { break }
+    $left | Remove-Item -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500
+  }
   return $killed
 }
 
