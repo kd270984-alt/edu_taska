@@ -792,6 +792,56 @@
     .fld-rec .recrow select.recsel{width:100%;min-width:0}
     .fld-row2 .fld-b{height:auto;min-height:40px}
   }
+  /* ======================= CRM ДЛЯ ПРИМЕРА (решение владельца 11.11.2026) =======================
+     Раздел меню «CRM»: сделки воронкой, клиенты, товары. Виден только при CRM_DEMO=1 в .env.
+     Те же карты, строки и кнопки, что у остальных списков Таски — своего стиля у CRM нет. */
+  .crm-tot{display:flex;gap:8px 20px;flex-wrap:wrap;font-size:13px;color:#5b6572;margin:0 0 12px}
+  .crm-tot b{color:var(--ink);font-weight:650}
+  .crm-board{display:flex;gap:10px;overflow-x:auto;align-items:flex-start;padding-bottom:10px;scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch}
+  .crm-col{flex:1 0 200px;min-width:0;background:#f4f6f9;border-radius:16px;padding:10px;display:flex;flex-direction:column;gap:8px;scroll-snap-align:start;transition:background .12s}
+  .crm-col.over{background:#eaf1fd;box-shadow:0 0 0 2px #9cc0f5 inset}
+  .crm-ch{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:650;color:var(--ink);padding:2px 4px 0}
+  .crm-ch i{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+  .crm-ch .n{margin-left:auto;color:var(--textdim);font-weight:500}
+  .crm-cs{font-size:12px;color:#7c8794;padding:0 4px 2px}
+  .crm-card{background:#fff;border:1px solid #eef0f4;border-radius:13px;padding:10px 11px;cursor:pointer;box-shadow:0 1px 3px rgba(20,30,45,.05)}
+  .crm-card:hover{border-color:#cfe0fb}
+  .crm-card.drag{opacity:.4}
+  .crm-card .t{font-size:13px;color:var(--ink);font-weight:550;line-height:1.3;overflow-wrap:anywhere}
+  .crm-card .c{font-size:12px;color:#7c8794;margin-top:3px;overflow-wrap:anywhere}
+  .crm-card .b{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;font-size:12.5px;font-weight:650;color:var(--ink)}
+  .crm-card .b .no{color:var(--textdim);font-weight:400}
+  .crm-none{font-size:12px;color:var(--textdim);text-align:center;padding:10px 0 6px}
+  .crm-row{flex-wrap:wrap;row-gap:6px}
+  .crm-row.ro{cursor:default}
+  .crm-main{flex:1 1 220px;min-width:0}
+  .crm-nm{font-size:13.5px;color:var(--ink);font-weight:600;overflow-wrap:anywhere}
+  .crm-sub{font-size:12px;color:#7c8794;margin-top:2px;overflow-wrap:anywhere}
+  .crm-tel{font-size:13px;color:#2563eb;text-decoration:none;white-space:nowrap}
+  .crm-tel:hover{text-decoration:underline}
+  .crm-num{flex:0 0 auto;text-align:right;font-size:12px;color:#7c8794;display:flex;flex-direction:column;align-items:flex-end;min-width:120px}
+  .crm-num b{font-size:13.5px;color:var(--ink);font-weight:650}
+  .crm-unit{flex:0 0 auto;font-size:12.5px;color:#7c8794;min-width:52px}
+  .crm-price{flex:0 0 auto;font-size:13.5px;font-weight:650;color:var(--ink);min-width:86px;text-align:right}
+  .crm-stg{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}
+  .crm-stg button{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 11px;border-radius:15px;border:1px solid var(--border);background:#fff;font:inherit;font-size:12.5px;color:#3f4854;cursor:pointer}
+  .crm-stg button i{width:8px;height:8px;border-radius:50%}
+  .crm-stg button.on{background:var(--black);border-color:var(--black);color:#fff;font-weight:600}
+  .crm-stg button:disabled{cursor:default}
+  .crm-sec{font-size:11.5px;letter-spacing:.07em;color:var(--textdim);margin:18px 0 8px;display:flex;align-items:center;gap:8px}
+  .crm-sec .tbtn{margin-left:auto;height:32px;font-size:12.5px;padding:0 12px}
+  .crm-drow{display:flex;align-items:center;gap:10px;padding:9px 11px;border:1px solid #eef0f4;border-radius:12px;margin-bottom:6px;cursor:pointer;font-size:13px}
+  .crm-drow:hover{border-color:#cfe0fb;background:#fafcff}
+  .crm-drow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .crm-drow .st{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:#5b6572;white-space:nowrap}
+  .crm-drow .st i{width:7px;height:7px;border-radius:50%}
+  .crm-drow .sm{font-weight:650;white-space:nowrap}
+  .crm-foot{display:flex;align-items:center;gap:9px;margin-top:14px;padding-top:12px;border-top:1px solid #eef0f4}
+  body.mobile .crm-col{flex:0 0 78vw}
+  body.mobile #viewHost .crm-bar .srch{flex:0 0 auto}   /* в столбце flex-basis из общих правил .srch превращался в высоту 190px */
+  body.mobile #viewHost .vw-seg button{flex:1}
+  body.mobile .crm-num{min-width:0;align-items:flex-start;text-align:left}
+  @media (max-width:700px){ .crm-foot .tbtn.danger span{display:none} .crm-foot .tbtn.danger{padding:0 12px} .crm-drow .st{display:none} }
 </style>
 
 <div id="mobile">
@@ -824,6 +874,7 @@
       <button class="nv-i" data-view="team" data-tip="Команда"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9.2" cy="8.2" r="3.4"/><path d="M3.3 19.6c.6-3.3 2.9-5.2 5.9-5.2s5.3 1.9 5.9 5.2"/><path d="M16.4 5.3a3.1 3.1 0 0 1 0 5.9M17.8 14.9c2 .5 3.3 2.1 3.7 4.5"/></svg><span>Команда</span></button>
       <button class="nv-i" data-view="tags" data-tip="Метки"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11.7 3.3H5.5A2.2 2.2 0 0 0 3.3 5.5v6.2c0 .6.2 1.1.6 1.6l7.3 7.3a2.2 2.2 0 0 0 3.1 0l5.8-5.8a2.2 2.2 0 0 0 0-3.1L12.8 3.9a2.2 2.2 0 0 0-1.1-.6Z"/><circle cx="8" cy="8" r="1.35"/></svg><span>Метки</span></button>
       <button class="nv-i" data-view="deleg" data-tip="Делегированные"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13.6 4.4h5.4v5.4"/><path d="M19 4.4 11.4 12"/><path d="M19 14.3v3.1a2.6 2.6 0 0 1-2.6 2.6H7.1a2.6 2.6 0 0 1-2.6-2.6V8.1a2.6 2.6 0 0 1 2.6-2.6h3.1"/></svg><span>Делегированные</span></button>
+      <button class="nv-i hidden" data-view="crm" data-tip="CRM"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7.2" width="18" height="12.8" rx="3"/><path d="M8.7 7.2V5.7a2.1 2.1 0 0 1 2.1-2.1h2.4a2.1 2.1 0 0 1 2.1 2.1v1.5"/><path d="M3 12.7h18"/></svg><span>CRM</span></button>
     </div>
     <div class="nv-bot">
       <button class="nv-fab" id="addBtn" title="Создать задачу"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5.2v13.6M5.2 12h13.6"/></svg></button>
@@ -3353,10 +3404,12 @@ const VIEWS={
   my:{t:'Мои задачи',s:'Всё, что на вас, — одним списком'},
   team:{t:'Команда',s:'Сотрудники и доступ в Таску'},
   tags:{t:'Метки',s:'Цветные метки для задач'},
-  deleg:{t:'Делегированные',s:'Задачи, которые вы поручили другим'}
+  deleg:{t:'Делегированные',s:'Задачи, которые вы поручили другим'},
+  crm:{t:'CRM',s:'Клиенты, сделки и товары — учебный пример'}
 };
 const viewHost=document.getElementById('viewHost');
 let curView='cal';
+let crmOn=false, crmStages=[];   // CRM для примера: включена ли на сервере и её этапы (см. блок CRM ниже)
 // ⚠️ «Команда» и «Метки» — РАЗДЕЛЫ АДМИНИСТРАТОРА. Сотрудник их не видит в меню и не может открыть:
 //    в «Команде» лежат люди и доступы, в «Метках» — общий справочник. Правка 20.09.2026, пункт 7.
 //    Проверка стоит в трёх местах: меню (не показать), setView (не пустить), сами списки (не нарисовать).
@@ -3369,6 +3422,7 @@ function applyRole(){
 }
 function setView(v){
   if(ADMIN_VIEWS[v] && !amAdmin()) v='cal';   // не админ — в админский раздел не пускаем даже по прямому вызову
+  if(v==='crm' && !crmOn) v='cal';               // CRM выключена (нет CRM_DEMO=1) — раздела нет
   if(!VIEWS[v]) v='cal';
   curView=v;
   document.querySelectorAll('#nav .nv-i').forEach(b=>b.classList.toggle('on', b.dataset.view===v));
@@ -3394,6 +3448,7 @@ async function renderView(){
   if(curView==='team') return renderTeamView();
   if(curView==='tags') return renderTagsView();
   if(curView==='deleg') return renderDelegView();
+  if(curView==='crm') return renderCrmView();
 }
 function refreshView(){ if(curView!=='cal') renderView(); }   // данные обновились — обновить открытый список
 document.querySelectorAll('#nav .nv-i').forEach(b=>{ b.onclick=()=>setView(b.dataset.view); });
@@ -3608,6 +3663,280 @@ async function renderDelegView(){
     if(full) openTaskCard(full);
     else showToast('Эту задачу ведёт '+it.who+' — карточка доступна только ответственному и соисполнителям', 5000);
   });
+}
+
+/* ================= CRM ДЛЯ ПРИМЕРА (решение владельца 11.11.2026) =================
+   Простой раздел внутри Таски: «Сделки» (воронка по этапам), «Клиенты», «Товары» — «просто демо».
+   Включается строкой CRM_DEMO=1 в .env (команда bash scripts/crm-demo.sh on). Выключена — пункта
+   в меню нет и Таска выглядит как раньше: о CRM фронт узнаёт у сервера (/api/crm/status).
+   Сделку двигают по этапам перетаскиванием карточки (компьютер) или кнопками этапов в карточке (телефон).
+   Все видят всех клиентов и все сделки, в воронке есть фильтр «Мои»; прайс правит администратор. */
+let crmTab='deals', crmQ='', crmMine=false, crmData=null, crmDrag=null;
+const CRM_COLORS={new:'#98a1ad',need:'#5b9bf0',offer:'#8b6fe0',talks:'#e0a23d',invoice:'#e07b3d',won:'#22a35a',lost:'#d64545'};
+const crmFmt=n=>new Intl.NumberFormat('ru-RU',{maximumFractionDigits:2}).format(+n||0);
+const rub=n=>crmFmt(n)+' ₽';
+// сумму люди вводят как придётся: «150 000», «150000,50», «150 000 ₽»
+const crmNum=v=>{ const t=String(v==null?'':v).replace(/[\s ₽]/g,'').replace(',','.'); return t===''?0:Number(t); };
+const crmStageName=k=>{ const st=crmStages.find(x=>x.key===k); return st?st.name:k; };
+const crmCanWrite=()=>!!(me&&me.role!=='viewer');
+const crmPlural=(n,a,b,c)=>{ const m10=n%10, m100=n%100; return (m10===1&&m100!==11)?a:(m10>=2&&m10<=4&&(m100<10||m100>=20))?b:c; };
+const crmClosed=d=>d.stage==='won'||d.stage==='lost';
+const crmSum=a=>a.reduce((x,d)=>x+(+d.amount||0),0);
+
+async function checkCrm(){
+  let d=null; try{ d=await api('/api/crm/status'); }catch(e){}   // старый сервер без CRM ответит 404 — значит, раздела нет
+  crmOn=!!(d&&d.enabled); crmStages=(d&&d.stages)||[];
+  document.querySelectorAll('#nav .nv-i[data-view="crm"]').forEach(b=>b.classList.toggle('hidden', !crmOn));
+  if(!crmOn && curView==='crm') setView('cal');
+}
+
+// Загрузка: три коротких списка разом. Поиск, вкладки и «Мои» дальше работают по ним без сети.
+async function renderCrmView(){
+  if(!crmOn){ viewHost.innerHTML=''; setView('cal'); return; }
+  try{
+    const [c,d,p]=await Promise.all([api('/api/crm/companies'),api('/api/crm/deals'),api('/api/crm/products'),getUsers()]);
+    crmData={C:c.companies||[], D:d.deals||[], P:p.products||[]};
+  }catch(e){ if(curView==='crm') viewHost.innerHTML='<div class="lempty">CRM не ответила: '+esc(e.message)+'</div>'; return; }
+  if(curView!=='crm') return;   // пока грузили, человек ушёл в другой раздел
+  paintCrm();
+}
+function paintCrm(){
+  if(curView!=='crm'||!crmData) return;
+  const addLbl={deals:'Сделка',clients:'Клиент',goods:'Товар'}[crmTab];
+  // кнопка «+» есть и в пустой CRM: после clear администратор может начать свою CRM с нуля (находка критика 12.11.2026)
+  const canAdd=crmTab==='goods'?amAdmin():crmCanWrite();
+  const ph={deals:'Сделка или клиент…',clients:'Клиент или телефон…',goods:'Товар или категория…'}[crmTab];
+  viewHost.innerHTML='<div class="vw-bar crm-bar">'
+     +'<div class="vw-seg">'+[['deals','Сделки'],['clients','Клиенты'],['goods','Товары']].map(([k,l])=>'<button data-ct="'+k+'" class="'+(crmTab===k?'on':'')+'">'+l+'</button>').join('')+'</div>'
+     +'<label class="srch" style="width:250px">'+ICO.search+'<input id="crmQ" placeholder="'+ph+'" value="'+esc(crmQ)+'" autocomplete="off"></label>'
+     +(crmTab==='deals'?'<div class="vw-seg"><button data-cm="0" class="'+(crmMine?'':'on')+'">Все</button><button data-cm="1" class="'+(crmMine?'on':'')+'">Мои</button></div>':'')
+     +(canAdd?'<button class="tbtn dark" id="crmAdd" style="margin-left:auto;height:36px">'+ICO.plus+addLbl+'</button>':'')
+    +'</div><div id="crmBody"></div>';
+  viewHost.querySelectorAll('[data-ct]').forEach(b=>b.onclick=()=>{ crmTab=b.dataset.ct; crmQ=''; paintCrm(); });
+  viewHost.querySelectorAll('[data-cm]').forEach(b=>b.onclick=()=>{ crmMine=b.dataset.cm==='1'; paintCrm(); });
+  const qi=document.getElementById('crmQ'); qi.oninput=()=>{ crmQ=qi.value; paintCrmBody(); };   // перерисовываем только список — поле поиска не теряет фокус
+  const ab=document.getElementById('crmAdd');
+  if(ab) ab.onclick=()=>{ if(crmTab==='deals') openCrmDeal(null); else if(crmTab==='clients') openCrmCompany(null); else openCrmProduct(null); };
+  paintCrmBody();
+}
+function paintCrmBody(){
+  const host=document.getElementById('crmBody'); if(!host||!crmData) return;
+  const {C,D,P}=crmData, q=crmQ.trim().toLowerCase();
+  if(!C.length&&!D.length&&!P.length){
+    const hint=crmTab==='goods'?(amAdmin()?'Добавьте первый товар кнопкой «Товар» вверху':'')
+              :crmCanWrite()?'Начните с клиента: вкладка «Клиенты», кнопка «Клиент» вверху':'';
+    host.innerHTML='<div class="lempty">В CRM пока пусто.'
+      +(hint?' '+hint+(amAdmin()?' — или загрузите готовый пример.':'.'):'')
+      +(amAdmin()?'<div style="margin-top:14px"><button class="tbtn" id="crmDemo">Загрузить пример «Плёнка и Короб»</button></div>'
+                 :'<br>Готовый пример загружает администратор.')+'</div>';
+    const db=document.getElementById('crmDemo');
+    if(db) db.onclick=async()=>{ db.disabled=true;
+      try{ const r=await api('/api/crm/demo',{method:'POST',body:'{}'}); showToast('Пример загружен: клиентов '+r.companies+', сделок '+r.deals+', товаров '+r.products, 4000); }
+      catch(e){ showToast('Не удалось: '+e.message); }
+      renderCrmView(); };
+    return;
+  }
+  if(crmTab==='deals') return paintCrmDeals(host, D, q);
+  if(crmTab==='clients') return paintCrmClients(host, C, q);
+  return paintCrmGoods(host, P, q);
+}
+
+/* ---- СДЕЛКИ: воронка колонками этапов ---- */
+function paintCrmDeals(host, D, q){
+  let list=D;
+  if(crmMine&&me) list=list.filter(d=>d.owner_id===me.id);
+  if(q) list=list.filter(d=>(d.title+' '+(d.company_name||'')).toLowerCase().includes(q));
+  const open=list.filter(d=>!crmClosed(d)), won=list.filter(d=>d.stage==='won');
+  const can=crmCanWrite();
+  host.innerHTML='<div class="crm-tot"><span>В работе: <b>'+open.length+'</b> '+crmPlural(open.length,'сделка','сделки','сделок')+' на <b>'+rub(crmSum(open))+'</b></span>'
+      +'<span>Оплачено: <b>'+rub(crmSum(won))+'</b></span>'
+      +(can&&!isMobileView()?'<span style="color:var(--textdim)">Перетащите карточку в другой этап</span>':'')+'</div>'
+    +'<div class="crm-board">'+crmStages.map(st=>{ const ds=list.filter(d=>d.stage===st.key);
+      return '<div class="crm-col" data-st="'+st.key+'">'
+        +'<div class="crm-ch"><i style="background:'+(CRM_COLORS[st.key]||'#98a1ad')+'"></i>'+esc(st.name)+'<span class="n">'+ds.length+'</span></div>'
+        +'<div class="crm-cs">'+rub(crmSum(ds))+'</div>'
+        +ds.map(d=>'<div class="crm-card" data-deal="'+d.id+'"'+(can?' draggable="true"':'')+' title="Открыть сделку">'
+            +'<div class="t">'+esc(d.title)+'</div><div class="c">'+esc(d.company_name||'')+'</div>'
+            +'<div class="b"><span>'+(+d.amount?rub(d.amount):'<span class="no">сумма не указана</span>')+'</span>'+(d.owner_id?ava(d.owner_id,22):'')+'</div>'
+          +'</div>').join('')
+        +(ds.length?'':'<div class="crm-none">'+(q||crmMine?'—':'Нет сделок')+'</div>')
+      +'</div>'; }).join('')+'</div>';
+  host.querySelectorAll('.crm-card').forEach(el=>{
+    el.onclick=()=>{ const d=crmData.D.find(x=>x.id===el.dataset.deal); if(d) openCrmDeal(d); };
+    el.ondragstart=e=>{ crmDrag=el.dataset.deal; el.classList.add('drag'); try{ e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/plain', crmDrag); }catch(_){} };
+    el.ondragend=()=>{ crmDrag=null; el.classList.remove('drag'); host.querySelectorAll('.crm-col.over').forEach(c=>c.classList.remove('over')); };
+  });
+  host.querySelectorAll('.crm-col').forEach(col=>{
+    col.ondragover=e=>{ if(!crmDrag) return; e.preventDefault(); col.classList.add('over'); };
+    col.ondragleave=e=>{ if(!col.contains(e.relatedTarget)) col.classList.remove('over'); };
+    col.ondrop=e=>{ e.preventDefault(); col.classList.remove('over'); const id=crmDrag; crmDrag=null; if(id) crmMoveDeal(id, col.dataset.st); };
+  });
+}
+// Смена этапа: карточка встаёт в новую колонку сразу, сервер — следом; отказ сервера возвращает её на место
+async function crmMoveDeal(id, st){
+  const d=crmData&&crmData.D.find(x=>x.id===id); if(!d||d.stage===st) return;
+  const old=d.stage; d.stage=st; paintCrmBody();
+  try{ await api('/api/crm/deals/'+id,{method:'PATCH',body:JSON.stringify({stage:st})}); showToast('«'+d.title+'» — '+crmStageName(st)); }
+  catch(e){ d.stage=old; paintCrmBody(); showToast('Не удалось перенести: '+e.message); }
+}
+
+/* ---- КЛИЕНТЫ: компании с контактом и телефоном ---- */
+function paintCrmClients(host, C, q){
+  let list=C;
+  if(q) list=list.filter(c=>[c.name,c.contact_name,c.phone,c.email,c.city].join(' ').toLowerCase().includes(q));
+  if(!list.length){ host.innerHTML='<div class="lempty">'+(q?'Ничего не найдено':'Клиентов пока нет')+'</div>'; return; }
+  host.innerHTML='<div class="vw-h">КЛИЕНТЫ · '+list.length+'</div>'+list.map(c=>
+    '<div class="lrow crm-row" data-co="'+c.id+'" title="Открыть клиента">'
+      +'<div class="crm-main"><div class="crm-nm">'+esc(c.name)+'</div><div class="crm-sub">'+esc([c.contact_name,c.city].filter(Boolean).join(' · '))+'</div></div>'
+      +(c.phone?'<a class="crm-tel" href="tel:'+esc(String(c.phone).replace(/[^\d+]/g,''))+'">'+esc(c.phone)+'</a>':'')
+      +'<div class="crm-num">'+(c.open_deals
+          ?'<b>'+rub(c.open_sum)+'</b><span>'+c.open_deals+' '+crmPlural(c.open_deals,'сделка','сделки','сделок')+' в работе</span>'
+          :'<span>'+(+c.won_sum?'оплачено '+rub(c.won_sum):'сделок в работе нет')+'</span>')+'</div>'
+    +'</div>').join('');
+  host.querySelectorAll('.crm-tel').forEach(a=>a.onclick=e=>e.stopPropagation());   // звонок — не открывать карточку
+  host.querySelectorAll('[data-co]').forEach(r=>r.onclick=()=>{ const c=crmData.C.find(x=>x.id===r.dataset.co); if(c) openCrmCompany(c); });
+}
+
+/* ---- ТОВАРЫ: короткий прайс по категориям ---- */
+function paintCrmGoods(host, P, q){
+  let list=P;
+  if(q) list=list.filter(p=>(p.name+' '+p.category).toLowerCase().includes(q));
+  if(!list.length){ host.innerHTML='<div class="lempty">'+(q?'Ничего не найдено':'Товаров пока нет')+'</div>'; return; }
+  const adm=amAdmin(), cats=[...new Set(list.map(p=>p.category))];
+  host.innerHTML=cats.map(cat=>'<div class="vw-h" style="margin-top:4px">'+esc(String(cat).toUpperCase())+'</div>'
+    +list.filter(p=>p.category===cat).map(p=>'<div class="lrow crm-row'+(adm?'':' ro')+'" data-pr="'+p.id+'"'+(adm?' title="Изменить товар"':'')+'>'
+      +'<div class="crm-main"><div class="crm-nm" style="font-weight:500">'+esc(p.name)+'</div></div>'
+      +'<div class="crm-unit">'+esc(p.unit)+'</div><div class="crm-price">'+rub(p.price)+'</div></div>').join('')).join('')
+    +(adm?'':'<div class="lempty" style="padding:14px 0">Цены меняет администратор</div>');
+  if(adm) host.querySelectorAll('[data-pr]').forEach(r=>r.onclick=()=>{ const p=crmData.P.find(x=>x.id===r.dataset.pr); if(p) openCrmProduct(p); });
+}
+
+/* ---- КАРТОЧКИ (окно по центру — как профиль сотрудника) ---- */
+if(!TICON.phone) TICON.phone='<path d="M5 4h3.2l1.6 4-2 1.3a10.5 10.5 0 005 5l1.3-2 4 1.6V17a2 2 0 01-2 2A15 15 0 013 6a2 2 0 012-2z"/>';
+const crmRow=(icon,label,inner)=>'<div class="trow2"><div class="tlab">'+ic(icon)+'<span>'+label+'</span></div><div>'+inner+'</div></div>';
+const crmVal=id=>{ const el=document.getElementById(id); return el?el.value.trim():''; };
+const crmMark=(id,bad)=>{ const el=document.getElementById(id); if(el) el.style.borderColor=bad?'#e5484d':''; };
+async function crmSave(path, method, body, okText){
+  try{ await api(path,{method,body:JSON.stringify(body)}); closeModal(); showToast(okText); await renderCrmView(); return true; }
+  catch(e){ showToast('Не удалось: '+e.message, 4000); return false; }
+}
+
+async function openCrmDeal(deal, companyId){
+  const users=await getUsers(), C=(crmData&&crmData.C)||[];
+  if(!C.length){ showToast('Сначала добавьте клиента — сделка всегда с кем-то'); return; }
+  const isNew=!deal, can=crmCanWrite();
+  const d=deal||{title:'',company_id:companyId||'',stage:'new',amount:0,owner_id:me&&me.id,note:''};
+  let stage=d.stage;
+  const lostOwner=d.owner_id&&!users.some(u=>u.id===d.owner_id);   // сотрудник без доступа — не терять его молча при сохранении
+  const dis=can?'':' disabled';
+  dlg.classList.add('dlg2');
+  dlg.innerHTML='<div class="tc-kind">'+(isNew?'НОВАЯ СДЕЛКА':'СДЕЛКА')+'</div>'
+    +'<input class="tc-name" id="cdTitle" placeholder="Название сделки" value="'+esc(d.title)+'" maxlength="200"'+dis+'>'
+    +'<div class="crm-stg" id="cdStage">'+crmStages.map(st=>'<button type="button" data-st="'+st.key+'" class="'+(st.key===stage?'on':'')+'"'+dis+'><i style="background:'+(CRM_COLORS[st.key]||'#98a1ad')+'"></i>'+esc(st.name)+'</button>').join('')+'</div>'
+    +crmRow('folder','Клиент','<select class="tin" id="cdCo"'+dis+'>'+(d.company_id?'':'<option value="">— выберите клиента —</option>')
+        +C.map(c=>'<option value="'+c.id+'"'+(c.id===d.company_id?' selected':'')+'>'+esc(c.name)+'</option>').join('')+'</select>')
+    +crmRow('flag','Сумма, ₽','<input class="tin" id="cdSum" inputmode="decimal" placeholder="например, 150 000" value="'+(+d.amount?esc(crmFmt(d.amount)):'')+'"'+dis+'>')
+    +crmRow('user','Ответственный','<select class="tin" id="cdOwner"'+dis+'><option value="">— не назначен —</option>'
+        +(lostOwner?'<option value="'+esc(d.owner_id)+'" selected>сотрудник без доступа</option>':'')
+        +users.map(u=>'<option value="'+u.id+'"'+(u.id===d.owner_id?' selected':'')+'>'+esc(u.name)+'</option>').join('')+'</select>')
+    +crmRow('text','Заметка','<textarea class="tin" id="cdNote" placeholder="Что важно помнить по сделке" maxlength="2000"'+dis+'>'+esc(d.note||'')+'</textarea>')
+    +'<div class="crm-foot">'+(!isNew&&can?'<button class="tbtn danger" id="cdDel" title="Удалить сделку">'+ICO.trash+'<span>Удалить</span></button>':'')
+      +'<span style="flex:1"></span><button class="tbtn" id="cdClose">Закрыть</button>'
+      +(can?'<button class="tbtn blue" id="cdSave">'+(isNew?'Создать':'Сохранить')+'</button>':'')+'</div>';
+  modal.classList.add('show');
+  if(isNew) setTimeout(()=>{ const i=document.getElementById('cdTitle'); if(i) i.focus(); },60);
+  dlg.querySelectorAll('#cdStage [data-st]').forEach(b=>b.onclick=()=>{ stage=b.dataset.st;
+    dlg.querySelectorAll('#cdStage [data-st]').forEach(x=>x.classList.toggle('on', x.dataset.st===stage)); });
+  document.getElementById('cdClose').onclick=closeModal;
+  const del=document.getElementById('cdDel');
+  if(del) del.onclick=async()=>{ if(!await uiConfirm('Удалить сделку «'+d.title+'»? Вернуть её будет нельзя.')) return;
+    try{ await api('/api/crm/deals/'+d.id,{method:'DELETE'}); closeModal(); showToast('Сделка удалена'); renderCrmView(); }
+    catch(e){ showToast('Не удалось удалить: '+e.message); } };
+  const sv=document.getElementById('cdSave');
+  if(sv) sv.onclick=async()=>{
+    const title=crmVal('cdTitle'), company_id=crmVal('cdCo'), amount=crmNum(crmVal('cdSum'));
+    crmMark('cdTitle',!title); crmMark('cdCo',!company_id);
+    if(!title){ showToast('Укажите название сделки'); return; }
+    if(!company_id){ showToast('Выберите клиента'); return; }
+    if(!Number.isFinite(amount)||amount<0){ crmMark('cdSum',true); showToast('Сумма — число, например 150 000'); return; }
+    const body={title,company_id,stage,amount,owner_id:crmVal('cdOwner')||null,note:crmVal('cdNote')};
+    sv.disabled=true;
+    const ok=isNew?await crmSave('/api/crm/deals','POST',body,'Сделка создана'):await crmSave('/api/crm/deals/'+d.id,'PATCH',body,'Сохранено');
+    if(!ok) sv.disabled=false;
+  };
+}
+
+async function openCrmCompany(co){
+  const isNew=!co, can=crmCanWrite(), dis=can?'':' disabled';
+  const c=co||{name:'',contact_name:'',phone:'',email:'',city:'',note:''};
+  const deals=isNew?[]:((crmData&&crmData.D)||[]).filter(d=>d.company_id===c.id);
+  dlg.classList.add('dlg2');
+  dlg.innerHTML='<div class="tc-kind">'+(isNew?'НОВЫЙ КЛИЕНТ':'КЛИЕНТ')+'</div>'
+    +'<input class="tc-name" id="ccName" placeholder="Название компании" value="'+esc(c.name)+'" maxlength="200"'+dis+'>'
+    +crmRow('user','Контакт','<input class="tin" id="ccContact" placeholder="Имя и должность" value="'+esc(c.contact_name||'')+'" maxlength="200"'+dis+'>')
+    +crmRow('phone','Телефон','<input class="tin" id="ccPhone" type="tel" placeholder="+7 900 000-00-00" value="'+esc(c.phone||'')+'" maxlength="60"'+dis+'>')
+    +crmRow('doc','Почта','<input class="tin" id="ccEmail" type="email" placeholder="name@company.example" value="'+esc(c.email||'')+'" maxlength="200"'+dis+'>')
+    +crmRow('flag','Город','<input class="tin" id="ccCity" value="'+esc(c.city||'')+'" maxlength="100"'+dis+'>')
+    +crmRow('text','Заметка','<textarea class="tin" id="ccNote" placeholder="Чем занимается, что покупает" maxlength="2000"'+dis+'>'+esc(c.note||'')+'</textarea>')
+    +(isNew?'':('<div class="crm-sec">СДЕЛКИ · '+deals.length+(can?'<button class="tbtn" id="ccNewDeal">'+ICO.plus+'Новая сделка</button>':'')+'</div>'
+      +(deals.length?deals.map(d=>'<div class="crm-drow" data-deal="'+d.id+'"><span class="nm">'+esc(d.title)+'</span>'
+          +'<span class="st"><i style="background:'+(CRM_COLORS[d.stage]||'#98a1ad')+'"></i>'+esc(crmStageName(d.stage))+'</span>'
+          +'<span class="sm">'+(+d.amount?rub(d.amount):'—')+'</span></div>').join('')
+        :'<div style="font-size:12.5px;color:var(--textdim);padding:4px 2px">Сделок с этим клиентом пока нет</div>')))
+    +'<div class="crm-foot">'+(!isNew&&can?'<button class="tbtn danger" id="ccDel" title="Удалить клиента">'+ICO.trash+'<span>Удалить</span></button>':'')
+      +'<span style="flex:1"></span><button class="tbtn" id="ccClose">Закрыть</button>'
+      +(can?'<button class="tbtn blue" id="ccSave">'+(isNew?'Создать':'Сохранить')+'</button>':'')+'</div>';
+  modal.classList.add('show');
+  if(isNew) setTimeout(()=>{ const i=document.getElementById('ccName'); if(i) i.focus(); },60);
+  document.getElementById('ccClose').onclick=closeModal;
+  dlg.querySelectorAll('.crm-drow[data-deal]').forEach(r=>r.onclick=()=>{ const d=crmData.D.find(x=>x.id===r.dataset.deal); if(d) openCrmDeal(d); });
+  const nd=document.getElementById('ccNewDeal'); if(nd) nd.onclick=()=>openCrmDeal(null, c.id);
+  const del=document.getElementById('ccDel');
+  if(del) del.onclick=async()=>{
+    if(!await uiConfirm('Удалить клиента «'+c.name+'»?'+(deals.length?' Вместе с ним удалятся его сделки ('+deals.length+').':'')+' Вернуть будет нельзя.')) return;
+    try{ await api('/api/crm/companies/'+c.id,{method:'DELETE'}); closeModal(); showToast('Клиент удалён'); renderCrmView(); }
+    catch(e){ showToast('Не удалось удалить: '+e.message); } };
+  const sv=document.getElementById('ccSave');
+  if(sv) sv.onclick=async()=>{
+    const name=crmVal('ccName'); crmMark('ccName',!name);
+    if(!name){ showToast('Укажите название клиента'); return; }
+    const body={name,contact_name:crmVal('ccContact'),phone:crmVal('ccPhone'),email:crmVal('ccEmail'),city:crmVal('ccCity'),note:crmVal('ccNote')};
+    sv.disabled=true;
+    const ok=isNew?await crmSave('/api/crm/companies','POST',body,'Клиент добавлен'):await crmSave('/api/crm/companies/'+c.id,'PATCH',body,'Сохранено');
+    if(!ok) sv.disabled=false;
+  };
+}
+
+function openCrmProduct(pr){
+  if(!amAdmin()) return;   // прайс правит администратор (сервер проверяет то же самое)
+  const isNew=!pr, p=pr||{name:'',category:'',unit:'шт',price:0};
+  const cats=[...new Set(((crmData&&crmData.P)||[]).map(x=>x.category))];
+  dlg.classList.add('dlg2');
+  dlg.innerHTML='<div class="tc-kind">'+(isNew?'НОВЫЙ ТОВАР':'ТОВАР')+'</div>'
+    +'<input class="tc-name" id="cpName" placeholder="Название товара" value="'+esc(p.name)+'" maxlength="200">'
+    +crmRow('folder','Категория','<input class="tin" id="cpCat" list="cpCats" placeholder="например, Гофрокороба" value="'+esc(p.category||'')+'" maxlength="100">'
+        +'<datalist id="cpCats">'+cats.map(x=>'<option value="'+esc(x)+'">').join('')+'</datalist>')
+    +crmRow('doc','Единица','<input class="tin" id="cpUnit" placeholder="шт" value="'+esc(p.unit||'')+'" maxlength="30">')
+    +crmRow('flag','Цена, ₽','<input class="tin" id="cpPrice" inputmode="decimal" placeholder="0" value="'+(+p.price?esc(crmFmt(p.price)):'')+'">')
+    +'<div class="crm-foot">'+(!isNew?'<button class="tbtn danger" id="cpDel" title="Удалить товар">'+ICO.trash+'<span>Удалить</span></button>':'')
+      +'<span style="flex:1"></span><button class="tbtn" id="cpClose">Закрыть</button><button class="tbtn blue" id="cpSave">'+(isNew?'Создать':'Сохранить')+'</button></div>';
+  modal.classList.add('show');
+  if(isNew) setTimeout(()=>{ const i=document.getElementById('cpName'); if(i) i.focus(); },60);
+  document.getElementById('cpClose').onclick=closeModal;
+  const del=document.getElementById('cpDel');
+  if(del) del.onclick=async()=>{ if(!await uiConfirm('Удалить товар «'+p.name+'» из прайса?')) return;
+    try{ await api('/api/crm/products/'+p.id,{method:'DELETE'}); closeModal(); showToast('Товар удалён'); renderCrmView(); }
+    catch(e){ showToast('Не удалось удалить: '+e.message); } };
+  const sv=document.getElementById('cpSave');
+  sv.onclick=async()=>{
+    const name=crmVal('cpName'), price=crmNum(crmVal('cpPrice')); crmMark('cpName',!name);
+    if(!name){ showToast('Укажите название товара'); return; }
+    if(!Number.isFinite(price)||price<0){ crmMark('cpPrice',true); showToast('Цена — число, например 390'); return; }
+    const body={name,category:crmVal('cpCat'),unit:crmVal('cpUnit'),price};
+    sv.disabled=true;
+    const ok=isNew?await crmSave('/api/crm/products','POST',body,'Товар добавлен'):await crmSave('/api/crm/products/'+p.id,'PATCH',body,'Сохранено');
+    if(!ok) sv.disabled=false;
+  };
 }
 
 /* ---------- ПОИСК активных задач (панель справа, тот же принцип, что архив) ---------- */
@@ -3898,6 +4227,7 @@ async function start(){
   if(d.token && d.token!==token){ token=d.token; _sessionTok=token; try{ localStorage.setItem('canvas_token', token); }catch(e){} }
   renderAvaBtn();
   applyRole();       // админские разделы меню — только администратору
+  checkCrm();        // пункт «CRM» — только если на сервере включено CRM_DEMO=1 (ждать ответа не нужно)
   applyMySettings();   // ширина карточки задачи — из учётной записи, а не из браузера
   applyUiDensity();   // плотность доски под ширину экрана; меняет слот/шапку до первой отрисовки
   loadViewState();   // восстановить тумблеры/высоту/масштаб из прошлой сессии
