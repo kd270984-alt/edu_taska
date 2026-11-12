@@ -151,7 +151,7 @@ function Stop-Running([string]$AppDir, [string]$DestDir) {
       $ours = $cl -match 'taska-backup\.ps1|test-run\.ps1'
       if ($n -in @('powershell.exe', 'pwsh.exe') -and $ours -and ($cl.Contains($app) -or $id -eq $lockPid)) { $ids.Add($id) }
       elseif ($n -eq 'scp.exe' -and ($cl.Contains($dst) -or $cl -match '/backups/\d{4}-\d{2}-\d{2}\.sql\.gz"?\s+"?\.part-\d+\.sql\.gz')) { $ids.Add($id) }   # сирота: копия базы (путь относительный)
-      elseif ($n -eq 'sftp.exe' -and $cl -match '(^|\s)-b\s+"?batch\.txt') { $ids.Add($id) }   # сирота: докачка файлов задач
+      elseif ($n -eq 'sftp.exe' -and $cl -match '(^|\s)-b\s+"?batch\.txt' -and $cl -match ('\s"?' + [regex]::Escape($HostName.ToLowerInvariant()) + '"?\s*$')) { $ids.Add($id) }   # сирота: докачка файлов задач с нашего сервера
     }
   } elseif ($lockPid -and $lockPid -ne $PID) {
     $gp = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
@@ -274,6 +274,9 @@ catch { Stop-Install "Windows не принял задачу в Планиров
 
 # проверка: запускаем задачу и ждём её отметку о запуске (не дольше 60 с и в пределах 90 с на всё).
 # Конца не ждём: первая сверка файлов задач может идти долго, она докачивается в фоне.
+# длина журнала ДО запуска задачи: первая копия к этому времени уже закончилась, и всё, что допишется, — от задачи
+$Journal = Join-Path $Dest 'журнал.txt'
+$jlen0 = $(try { (Get-Item -LiteralPath $Journal -ErrorAction Stop).Length } catch { -1 })
 $T1 = [DateTimeOffset]::Now.ToUnixTimeSeconds()
 Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 $ok = $false; $sched = Join-Path $Dest '.state\last_sched'
@@ -290,15 +293,9 @@ if (-not $ok -and ([DateTimeOffset]::Now.ToUnixTimeSeconds() - $T1) -lt 55) {
   exit 4
 }
 if (-not $ok) {
-  # Решаем сами, а не ученик по журналу: запустилась ли задача после постановки (её строки в журнале позже $T1).
-  # Первая копия установщика пишет в журнал раньше — её строки не в счёт (проверка на Windows 12.11.2026).
-  $ran = $false
-  try {
-    $since = [DateTimeOffset]::FromUnixTimeSeconds($T1 - 2).LocalDateTime
-    foreach ($l in [IO.File]::ReadAllLines((Join-Path $Dest 'журнал.txt'))) {
-      if ($l -match '^(\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2}) ' -and [datetime]::ParseExact($Matches[1], 'dd.MM.yyyy HH:mm:ss', $null) -ge $since) { $ran = $true; break }
-    }
-  } catch {}
+  # Решаем сами, а не ученик по журналу: запустилась ли задача — вырос ли журнал после Start-ScheduledTask.
+  # По времени строк нельзя: строки первой копии ложатся в ту же секунду (проверка на Windows 12.11.2026).
+  $ran = ($(try { (Get-Item -LiteralPath $Journal -ErrorAction Stop).Length } catch { -1 }) -ne $jlen0)
   if ($ran) { Stop-Install "задача запустилась, но не дошла до конца за минуту. Откройте $Dest\журнал.txt и «Последняя копия.txt» из той же папки и покажите помощнику последние строки." }
   Stop-Install "задача поставлена, но Windows её не запустила — похоже, её не пускает антивирус или политика рабочего компьютера. Переустановите копию с -Window visible (README) или держите её вручную (README, «Скачать копию вручную»)."
 }

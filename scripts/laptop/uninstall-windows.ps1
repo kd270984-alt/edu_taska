@@ -42,7 +42,7 @@ function Stop-Running([string]$AppDir, [string]$DestDir) {
       $ours = $cl -match 'taska-backup\.ps1|test-run\.ps1'
       if ($n -in @('powershell.exe', 'pwsh.exe') -and $ours -and ($cl.Contains($app) -or $id -eq $lockPid)) { $ids.Add($id) }
       elseif ($n -eq 'scp.exe' -and ($cl.Contains($dst) -or $cl -match '/backups/\d{4}-\d{2}-\d{2}\.sql\.gz"?\s+"?\.part-\d+\.sql\.gz')) { $ids.Add($id) }   # сирота: копия базы (путь относительный)
-      elseif ($n -eq 'sftp.exe' -and $cl -match '(^|\s)-b\s+"?batch\.txt') { $ids.Add($id) }   # сирота: докачка файлов задач
+      elseif ($n -eq 'sftp.exe' -and $cl -match '(^|\s)-b\s+"?batch\.txt' -and $cl -match ('\s"?' + [regex]::Escape($HostName.ToLowerInvariant()) + '"?\s*$')) { $ids.Add($id) }   # сирота: докачка файлов задач с нашего сервера
     }
   } elseif ($lockPid -and $lockPid -ne $PID) {
     $gp = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
