@@ -29,22 +29,22 @@ const COMPANIES: Company[] = [
 // В демо-команде Таски это Анна Соколова, Игорь Волков и Мария Лебедева. days — сколько дней назад заведена.
 const DEALS: Deal[] = [
   { title: 'Заявка с сайта: короба для фулфилмента', company: 'yug', stage: 'new', amount: 0, who: 2, days: 1, note: 'Сумму назовём после звонка.' },
-  { title: 'Скотч с логотипом, пробная партия', company: 'lapa', stage: 'new', amount: 43500, who: 2, days: 2 },
+  { title: 'Скотч с логотипом, пробная партия', company: 'lapa', stage: 'new', amount: 43500, who: 3, days: 2 },
   { title: 'Защитная упаковка для мебели', company: 'kedr', stage: 'need', amount: 300000, who: 2, days: 6, note: 'Сумма примерная — ждём объёмы на квартал.' },
   { title: 'Термоэтикетки для аптечного склада', company: 'farm', stage: 'need', amount: 63000, who: 1, days: 5 },
   { title: 'Стреппинг для отгрузок', company: 'oka', stage: 'need', amount: 95000, who: 0, days: 8 },
   { title: 'Поддоны 1 200 шт + стрейч', company: 'vostok', stage: 'offer', amount: 980000, who: 1, days: 10 },
-  { title: 'Гофрокороба для хлеба и выпечки', company: 'kolos', stage: 'offer', amount: 126000, who: 2, days: 9 },
+  { title: 'Гофрокороба для хлеба и выпечки', company: 'kolos', stage: 'offer', amount: 126000, who: 3, days: 9 },
   { title: 'Риббоны и этикетки на квартал', company: 'agro', stage: 'offer', amount: 88400, who: 0, days: 12 },
   { title: 'Годовой контракт на машинную стрейч-плёнку', company: 'luga', stage: 'talks', amount: 1380000, who: 1, days: 20, note: 'Просят отсрочку 30 дней.' },
   { title: 'Пластиковые поддоны для цеха', company: 'plast', stage: 'talks', amount: 468000, who: 1, days: 15 },
   { title: 'Стрейч и короба для распределительного центра', company: 'polka', stage: 'talks', amount: 352000, who: 0, days: 14 },
   { title: 'Этикетки и риббоны для РЦ', company: 'polka', stage: 'invoice', amount: 146000, who: 0, days: 18 },
   { title: 'Воздушно-пузырьковая плёнка, 120 рулонов', company: 'kedr', stage: 'invoice', amount: 198000, who: 2, days: 11 },
-  { title: 'Короба трёх размеров на сезон', company: 'len', stage: 'won', amount: 214000, who: 2, days: 25 },
+  { title: 'Короба трёх размеров на сезон', company: 'len', stage: 'won', amount: 214000, who: 3, days: 25 },
   { title: 'Поддоны б/у, 500 шт', company: 'agro', stage: 'won', amount: 195000, who: 0, days: 32 },
   { title: 'Стрейч-плёнка ручная, 300 рулонов', company: 'vostok', stage: 'won', amount: 117000, who: 1, days: 40 },
-  { title: 'Короба для замороженной продукции', company: 'kolos', stage: 'lost', amount: 74000, who: 2, days: 28, note: 'Отказ: выбрали поставщика с доставкой в тот же день.' },
+  { title: 'Короба для замороженной продукции', company: 'kolos', stage: 'lost', amount: 74000, who: 3, days: 28, note: 'Отказ: выбрали поставщика с доставкой в тот же день.' },
   { title: 'Натяжители стреппинга, 10 шт', company: 'plast', stage: 'lost', amount: 69000, who: 1, days: 35, note: 'Отказ: закупку перенесли на следующий год.' },
 ];
 
@@ -67,7 +67,7 @@ const PRODUCTS: Product[] = [
   { category: 'Защитная упаковка', name: 'Уголок защитный 50×50×1000 мм', unit: 'шт', price: 32 },
   { category: 'Маркировка', name: 'Термоэтикетки 58×40, 1000 шт', unit: 'рулон', price: 210 },
   { category: 'Маркировка', name: 'Риббон воск 110 мм × 300 м', unit: 'шт', price: 520 },
-  { category: 'Маркировка', name: 'Натяжитель стреппинга ручной', unit: 'шт', price: 6900 },
+  { category: 'Скотч и стреппинг', name: 'Натяжитель стреппинга ручной', unit: 'шт', price: 6900 },
 ];
 
 export type CrmCounts = { companies: number; deals: number; products: number };
