@@ -19,6 +19,7 @@ import {
 } from './auth.ts';
 import { registerCrud } from './crud.ts';
 import { registerAgent, agentOnBehalf } from './agent.ts';
+import { registerCrm } from './crm.ts';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -222,6 +223,9 @@ registerAgent(app, pool);
 
 // Задачи, метки, вложения, пользователи (CRUD с проверкой ролей и прав) — модуль crud.ts
 registerCrud(app, pool);
+
+// CRM для примера: клиенты, сделки, товары. Выключена, пока в .env нет CRM_DEMO=1 (модуль crm.ts)
+registerCrm(app, pool);
 
 // понятная ошибка вместо «оборванного» ответа, когда файл больше лимита multer (50 МБ)
 app.use((err: any, _req: any, res: any, next: any) => {
