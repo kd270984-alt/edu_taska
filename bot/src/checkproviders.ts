@@ -29,7 +29,7 @@ interface World {
   sent: string[];                   // что бот написал в Телеграм
   delivered: number;
   tasks: any[];                     // что бот создал в Таске
-  llm: Record<string, any[]>;       // запросы к нейросетям
+  llm: Record<string, any[]>;       // запросы к нейросетям (fibers — вызовы поиска Kimi)
   unhooked?: boolean;               // бот выключил вебхук
   taskaFrom?: number;               // до этого момента Таска «ещё запускается» (503)
 }
@@ -118,6 +118,10 @@ async function anthropic(path: string, key: string, body: any, res: http.ServerR
   if (key === 'ak-test-402') return json(res, 402, { type: 'error', error: { type: 'billing_error', message: 'Your credit balance is too low to access the Anthropic API.' } });
   if (path !== '/v1/messages') return json(res, 404, { type: 'error', error: { type: 'not_found_error', message: 'not found' } });
   W.llm.anthropic.push(body);
+  // поиск выключен администратором организации: запрос с инструментом web_search — 400
+  if (key === 'ak-test-nosearch' && (body.tools || []).some((t: any) => t.type?.startsWith('web_search'))) {
+    return json(res, 400, { type: 'error', error: { type: 'invalid_request_error', message: 'web_search tool is disabled for this organization' } });
+  }
   const base = { id: 'msg_' + W.llm.anthropic.length, type: 'message', role: 'assistant', model: body.model, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 10 } };
   const msgs = body.messages || [];
   if (msgs.length === 1 && msgs[0].content === 'ping') return json(res, 200, { ...base, content: [{ type: 'text', text: 'pong' }], stop_reason: 'end_turn' });
@@ -136,9 +140,17 @@ async function anthropic(path: string, key: string, body: any, res: http.ServerR
   json(res, 200, { ...base, content: [think, { type: 'tool_use', id: 'toolu_' + W.llm.anthropic.length, name: 'create_task', input: toolArgs }], stop_reason: 'tool_use' });
 }
 
-// Kimi: chat completions, совместимый с OpenAI. Поиска (Formula) у поддельного нет — 404.
+// Kimi: chat completions, совместимый с OpenAI. Поиск (Formula) — только у ключа mk-test-search.
 function moonshot(path: string, key: string, body: any, res: http.ServerResponse): void {
   if (key === 'mk-test-403') return json(res, 403, { error: { message: 'Your region is not supported by this service.', type: 'permission_denied_error' } });
+  // Поиск (Formula) — только у ключа mk-test-search: у остальных поддельный Kimi отвечает 404, бот работает без поиска
+  if (key === 'mk-test-search' && path === '/formulas/moonshot/web-search:latest/tools') {
+    return json(res, 200, { tools: [{ type: 'function', function: { name: 'web_search', description: 'поиск', parameters: { type: 'object', properties: { query: { type: 'string' } } } } }] });
+  }
+  if (key === 'mk-test-search' && path === '/formulas/moonshot/web-search:latest/fibers') {
+    W.llm.fibers = [...(W.llm.fibers || []), body];
+    return json(res, 200, { id: 'f1', status: 'succeeded', context: { output: '', encrypted_output: 'ЗАШИФРОВАННЫЙ-РЕЗУЛЬТАТ' } });
+  }
   if (path !== '/chat/completions') return json(res, 404, { error: { message: 'not found', type: 'resource_not_found_error' } });
   W.llm.moonshot.push(body);
   const msgs = body.messages || [];
@@ -147,6 +159,11 @@ function moonshot(path: string, key: string, body: any, res: http.ServerResponse
     choices: [{ index: 0, message: { role: 'assistant', reasoning_content: 'думаю ' + W.llm.moonshot.length, ...message }, finish_reason: finish }],
   });
   if (msgs.length === 1 && msgs[0].content === 'ping') return reply({ content: 'pong' }, 'stop');
+  if (key === 'mk-test-search' && msgs.length > 1) {
+    const last = msgs[msgs.length - 1];
+    if (last?.role === 'tool') return reply({ content: 'Курс доллара сегодня — 100 рублей (по поиску).' }, 'stop');
+    return reply({ content: '', tool_calls: [{ id: 'web_search:0', type: 'function', function: { name: 'web_search', arguments: JSON.stringify({ query: 'курс доллара' }) } }] }, 'tool_calls');
+  }
   if (msgs[msgs.length - 1]?.role === 'tool') return reply({ content: `Создал задачу «Позвонить клиенту» на ${tomorrow}.` }, 'stop');
   reply({ content: '', tool_calls: [{ id: 'create_task:0', type: 'function', function: { name: 'create_task', arguments: JSON.stringify(toolArgs) } }] }, 'tool_calls');
 }
@@ -247,6 +264,17 @@ console.log('\nClaude (ANTHROPIC_API_KEY, без ключа OpenAI):');
   check('ключ не попал в журнал', noSecrets(r, 'ak-test-good'));
 }
 
+// 2б) Claude, поиск выключен в организации: бот повторяет без поиска и дальше работает без него
+console.log('\nClaude без поиска в интернете:');
+{
+  const r = await runBot({ AI_PROVIDER: 'anthropic', ANTHROPIC_API_KEY: 'ak-test-nosearch' }, fresh('T2S', [text(ask), text('и ещё одну такую же')]), answered(2));
+  check('задачи созданы, хотя поиск запрещён', W.tasks.length === 2, JSON.stringify(W.tasks));
+  check('в журнале — «работаю без него»', /Поиск в интернете у Claude выключен/.test(r.out));
+  const ok2 = W.llm.anthropic.filter((b) => b.messages.length > 1 || b.messages[0]?.content !== 'ping');
+  const last = ok2.at(-1);
+  check('второй ход сразу без поиска, и system не обещает поиск', !!last && !last.tools.some((t: any) => t.type?.startsWith('web_search')) && /искать в интернете;/.test(last.system), String(last?.tools?.length));
+}
+
 // 3) Kimi: задача из текста, reasoning_content сохраняется, низкая «глубина», поиск недоступен — без него
 console.log('\nKimi (MOONSHOT_API_KEY):');
 {
@@ -260,6 +288,18 @@ console.log('\nKimi (MOONSHOT_API_KEY):');
   check('сообщение с вызовом передано целиком (с reasoning_content)', reqs[1]?.messages.some((m: any) => m.role === 'assistant' && m.reasoning_content && m.tool_calls));
   check('результат инструмента — сообщение role=tool', reqs[1]?.messages.at(-1)?.role === 'tool');
   check('ключ не попал в журнал', noSecrets(r, 'mk-test-good'));
+}
+
+// 3б) Kimi с поиском в интернете (Formula): объявление берём у Kimi, вызов исполняет Kimi, результат — как есть
+console.log('\nKimi с поиском в интернете:');
+{
+  const r = await runBot({ AI_PROVIDER: 'moonshot', MOONSHOT_API_KEY: 'mk-test-search' }, fresh('T3S', [text('какой курс доллара?')]), answered(1));
+  const reqs = W.llm.moonshot.filter((b) => b.messages.length > 1);
+  check('поиск Kimi передан модели как инструмент', reqs[0]?.tools?.some((t: any) => t.function?.name === 'web_search') && reqs[0]?.tools?.some((t: any) => t.function?.name === 'create_task'), JSON.stringify(reqs[0]?.tools?.map((t: any) => t.function?.name)));
+  check('вызов поиска исполнен у Kimi (fibers: name и arguments как есть)', W.llm.fibers?.[0]?.name === 'web_search' && W.llm.fibers?.[0]?.arguments === JSON.stringify({ query: 'курс доллара' }), JSON.stringify(W.llm.fibers));
+  check('результат поиска (encrypted_output) вернулся модели сообщением tool', reqs[1]?.messages.at(-1)?.role === 'tool' && reqs[1]?.messages.at(-1)?.content === 'ЗАШИФРОВАННЫЙ-РЕЗУЛЬТАТ', JSON.stringify(reqs[1]?.messages.at(-1)));
+  check('человеку пришёл ответ', /Курс доллара/.test(W.sent[0] || ''), W.sent[0]);
+  check('ключ не попал в журнал', noSecrets(r, 'mk-test-search'));
 }
 
 // 4) Ошибки ключа: строка для портала + понятные слова человеку

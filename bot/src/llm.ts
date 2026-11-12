@@ -487,7 +487,10 @@ function moonshotEngine(): Engine {
       if (!names().has(call.name)) return null;
       try {
         const d: any = await client().post(`${KIMI_SEARCH}/fibers`, { body: { name: call.name, arguments: call.args }, timeout: 60_000, signal });
-        const out = d?.context?.output ?? d?.context?.encrypted_output;
+        // Как в документации Kimi: у поиска результат в encrypted_output, а output бывает пустой строкой —
+        // поэтому «||», а не «??». Статус не succeeded — поиск не удался, так модели и говорим.
+        if (d?.status && d.status !== 'succeeded') return 'ошибка: поиск не сработал — ' + String(d.status).slice(0, 100);
+        const out = d?.context?.output || d?.context?.encrypted_output;
         if (out === undefined || out === null || out === '') return 'поиск ничего не вернул';
         return typeof out === 'string' ? out : JSON.stringify(out);
       } catch (e) {
