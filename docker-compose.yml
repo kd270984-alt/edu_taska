@@ -1,3 +1,6 @@
+# Версии программ закреплены (тег@sha256): каждый ставит ровно ту сборку, что проверена на чистом сервере
+# 14.11.2026 — новая сборка «latest» у стороннего сборщика или свежий node/postgres не сломают установку.
+# Обновить: «обнови образы в docker-compose.yml на свежие дайджесты и проверь, что всё поднялось».
 # Потолок журналов: без него docker пишет логи без конца и однажды забивает диск сервера.
 x-logging: &logs
   driver: json-file
@@ -8,7 +11,7 @@ name: taska-edu
 services:
   postgres:
     logging: *logs
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:f377d590e5474681d4d7838635031a2b50647923b7abfa803ce9b5ff35d5c663
     restart: always
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
@@ -27,7 +30,7 @@ services:
     # ⚠️ Официальных образов MinIO больше нет: в 2025-м MinIO перестал их выкладывать, а 24.09.2026
     # закрыл и quay.io (401), и Docker Hub. pgsty/minio — тот же MinIO, собранный командой Pigsty:
     # та же команда запуска, те же настройки MINIO_ROOT_*, есть сборки amd64 и arm64.
-    image: pgsty/minio:latest
+    image: pgsty/minio:latest@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
     restart: always
     command: server /data --console-address ":9001"
     environment:
@@ -38,7 +41,7 @@ services:
 
   api:
     logging: *logs
-    image: node:22-alpine
+    image: node:22-alpine@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a
     restart: always
     working_dir: /app
     env_file: .env
@@ -53,7 +56,7 @@ services:
 
   caddy:
     logging: *logs
-    image: caddy:2-alpine
+    image: caddy:2-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
     restart: always
     env_file: .env
     ports:
@@ -71,7 +74,7 @@ services:
   # Телеграм-бот (необязательный). Запуск: docker compose --profile bot up -d
   bot:
     logging: *logs
-    image: node:22-alpine
+    image: node:22-alpine@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a
     restart: always
     working_dir: /app
     env_file: .env

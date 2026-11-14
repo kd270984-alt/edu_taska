@@ -494,7 +494,7 @@ Windows (пока установщик не проверен на ней), ра�
 | Симптом | Причина и что делать |
 |---|---|
 | `port is already allocated` | порт занят другой программой — поменяйте `HTTP_BIND` в `.env` |
-| `401 Unauthorized` или `pull access denied` на minio | официальный образ MinIO закрыт — в `docker-compose.yml` должна быть строка `image: pgsty/minio:latest` |
+| `401 Unauthorized` или `pull access denied` на minio | официальный образ MinIO закрыт — в `docker-compose.yml` образ minio должен быть `pgsty/minio` (строка `image: pgsty/minio:latest@sha256:…`, дайджест закрепляет проверенную сборку — не убирайте его) |
 | Страница открылась пустой | правили `web/index.html` — запустите `node scripts/check-web.js` |
 | Вход не пускает | смотрите `docker compose logs api`, там причина отказа словами |
 | После правки кода ничего не изменилось | `docker compose restart api`, а страницу обновите с Ctrl+Shift+R |
