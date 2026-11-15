@@ -5,3 +5,5 @@ node_modules/
 *.sql.gz
 bot/node_modules/
 api/node_modules/
+# пароль первого входа (scripts/first-login.sh) — только на сервере, в репозиторий никогда
+api/.first-login*

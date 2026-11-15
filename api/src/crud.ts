@@ -2,6 +2,7 @@ import type { Express, Response } from 'express';
 import type { Pool } from 'pg';
 import { requireAuth, requireRole, hashPassword, verifyToken, type AuthedRequest, type JwtUser } from './auth.ts';
 import { sanitizeDescription } from './html.ts';
+import { forgetFirstLogin } from './demo-seed.ts';
 import * as Minio from 'minio';
 import multer from 'multer';
 
@@ -693,6 +694,8 @@ export function registerCrud(app: Express, pool: Pool): void {
       params.push(req.params.id);
       const r = await pool.query(`update users set ${sets.join(', ')} where id = $${params.length} returning id, name, email, role, active, avatar_key, avatar_no`, params);
       if (!r.rows[0]) return fail(res, 404, 'not found');
+      // пароль сменили — записка первого входа (api/.first-login) с прежним паролем больше не нужна
+      if (typeof body.password === 'string' && body.password) forgetFirstLogin(r.rows[0].id);
       res.json({ ok: true, user: r.rows[0] });
     } catch (e) { oops(res, e); }
   });

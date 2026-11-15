@@ -1,11 +1,9 @@
 import http from 'node:http';
-import crypto from 'node:crypto';
 import express from 'express';
 import { Pool } from 'pg';
 import { WebSocketServer, WebSocket } from 'ws';
 import { migrate } from './migrate.ts';
 import {
-  hashPassword,
   verifyPasswordForgiving,
   normalizeLogin,
   loginFingerprint,
@@ -20,6 +18,7 @@ import {
 import { registerCrud } from './crud.ts';
 import { registerAgent, agentOnBehalf } from './agent.ts';
 import { registerCrm } from './crm.ts';
+import { firstStart } from './demo-seed.ts';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -255,23 +254,12 @@ wss.on('connection', (ws: WebSocket) => {
   ws.on('error', () => wsClients.delete(ws));
 });
 
-// Если пользователей нет — создаём админа из ADMIN_EMAIL с временным паролем (печатается в лог 1 раз)
-async function bootstrapAdmin(): Promise<void> {
-  const { rows } = await pool.query('select count(*)::int as n from users');
-  if (rows[0].n > 0) return;
-  const email = process.env.ADMIN_EMAIL || 'admin@example.com';
-  const pw = crypto.randomBytes(9).toString('base64url');
-  await pool.query(
-    `insert into users(name, email, password_hash, role, active) values($1,$2,$3,'admin',true)`,
-    ['Администратор', email, hashPassword(pw)],
-  );
-  console.log(`ADMIN_BOOTSTRAP email=${email} temp_password=${pw}`);
-}
-
 const port = Number(process.env.API_PORT || 3000);
 
+// Первый запуск (людей в базе нет): демо-команда или один администратор — см. demo-seed.ts.
+// Пароль администратора — не в журнале, а в api/.first-login; показывает его bash scripts/first-login.sh.
 migrate(pool)
-  .then(bootstrapAdmin)
+  .then(() => firstStart(pool))
   .then(() => {
     server.listen(port, '0.0.0.0', () => console.log(`taska-edu api listening on :${port}`));
   })

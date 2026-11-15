@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Дымовой прогон: проверяет, что живое приложение делает всё, что обещает.
 # Запуск:  bash scripts/smoke.sh admin@example.com 'пароль' [адрес]   (первый параметр — логин)
+# На свежей Таске (пароль ещё не меняли):
+#   bash scripts/smoke.sh admin "$(bash scripts/first-login.sh | sed -n 's/^Пароль: //p')"
 set -uo pipefail
 
 EMAIL="${1:-}"; PASS="${2:-}"; BASE="${3:-http://127.0.0.1:8088}"
