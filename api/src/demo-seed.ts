@@ -33,11 +33,16 @@ import { sanitizeDescription } from './html.ts';
 //    а если процесс упал между commit и переименованием, demo-cli show под тем же замком сверит .pending
 //    с базой и доведёт дело. Пока идёт посадка или сброс, show ждёт замка — и не стирает записку
 //    про ещё не закоммиченного администратора.
+//    Замок — на уровне соединения, а не транзакции (проверка 16.11): он держится и после commit, до конца
+//    переименования. Иначе show успевал вклиниться между commit и rename (ложное «перепишите пароль сейчас»,
+//    код 4), а второй сброс подряд — подложить свою .pending, которую первый переименовал бы как свою.
 //
 // ⚠️ СТАРЫЕ УСТАНОВКИ (до 16.11, был шаг «Оживить» — старый demo-reset.sh с паролем 123456 у admin,
 //    manager и user). При каждом старте api под тем же замком: у manager и user с паролем 123456 вход
 //    закрывается (password_hash = NULL, задачи остаются), у admin с 123456 — новый случайный пароль и
 //    записка, как при первом запуске. Повторный старт ничего не меняет: 123456 уже нет.
+//    Все входы, открытые раньше под этими логинами (в том числе посторонним по 123456), обрываются:
+//    поколение входов (users.token_version) растёт на 1, а сервер сверяет его на каждом запросе (проверка 16.11).
 
 export const FIRST_LOGIN_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '.first-login');
 
@@ -288,8 +293,25 @@ export async function wipeForDemo(client: PoolClient, keepEmails: string[]): Pro
   await client.query('delete from users where lower(email) <> all($1::text[])', [keepEmails.map((e) => e.toLowerCase())]);
 }
 
-// общий замок первого запуска, сброса демо и show (demo-cli) — независимая проверка 16.11
-export const LOCK = `select pg_advisory_xact_lock(hashtext('taska_first_start'))`;
+// Общий замок первого запуска, сброса демо, нового пароля администратора и show (demo-cli).
+// На уровне соединения (проверка 16.11): держится и после commit — до конца переименования записки.
+// Отпускаем сами в finally; не вышло отпустить — соединение выбрасываем (release(err)), а не возвращаем
+// в пул с замком. Упал весь процесс — база отпускает замок сама вместе с соединением.
+const LOCK_KEY = `hashtext('taska_first_start')`;
+export async function withFirstStartLock<T>(pool: Pool, fn: (c: PoolClient) => Promise<T>): Promise<T> {
+  const c = await pool.connect();
+  let bad: Error | undefined;
+  try {
+    try { await c.query(`select pg_advisory_lock(${LOCK_KEY})`); } catch (e) { bad = e as Error; throw e; }
+    try {
+      return await fn(c);
+    } finally {
+      await c.query(`select pg_advisory_unlock(${LOCK_KEY})`).catch((e: Error) => { bad = e; });
+    }
+  } finally {
+    c.release(bad);
+  }
+}
 
 // «30 задач и 3 подзадачи»
 export function tasksText(tasks: number, subtasks: number): string {
@@ -297,8 +319,10 @@ export function tasksText(tasks: number, subtasks: number): string {
 }
 
 // Общий пароль 123456 от прежнего шага «Оживить» (старый demo-reset.sh, до 16.11) — независимая проверка 16.11.
-// Внутри уже открытой транзакции под LOCK. manager и user (и выключенный admin) — вход закрыть: password_hash = NULL,
+// Внутри уже открытой транзакции под замком. manager и user (и выключенный admin) — вход закрыть: password_hash = NULL,
 // задачи остаются. Включённый admin — новый случайный пароль; записку пишет вызывающий. Повторно — ничего: 123456 уже нет.
+// И у тех, и у другого поколение входов растёт на 1: кто уже вошёл по 123456 (хоть посторонний), вылетает
+// на следующем же запросе (проверка 16.11).
 const OLD_DEMO_PASSWORD = '123456';
 async function closeOldDemoPasswords(client: PoolClient): Promise<{ closed: string[]; admin: { id: string; password: string } | null }> {
   const rows = (await client.query(
@@ -312,10 +336,10 @@ async function closeOldDemoPasswords(client: PoolClient): Promise<{ closed: stri
     if (!verifyPassword(OLD_DEMO_PASSWORD, r.password_hash)) continue;
     if (r.login === 'admin' && r.active) {
       const password = newPassword();
-      await client.query('update users set password_hash = $1 where id = $2', [hashPassword(password), r.id]);
+      await client.query('update users set password_hash = $1, token_version = token_version + 1 where id = $2', [hashPassword(password), r.id]);
       admin = { id: r.id, password };
     } else {
-      await client.query('update users set password_hash = null where id = $1', [r.id]);
+      await client.query('update users set password_hash = null, token_version = token_version + 1 where id = $1', [r.id]);
       closed.push(r.login);
     }
   }
@@ -328,10 +352,12 @@ async function closeOldDemoPasswords(client: PoolClient): Promise<{ closed: stri
 //   иначе (DEMO_SEED=0 или база вернулась из копии не целиком) → один администратор из ADMIN_EMAIL, как раньше.
 // Посадка демо упала — откат и один администратор: Таска запускается в любом случае.
 export async function firstStart(pool: Pool): Promise<void> {
-  const client = await pool.connect();
+  // два api разом (перезапуск внахлёст) не посадят демо дважды; замок держится до переименования записки
+  await withFirstStartLock(pool, (client) => firstStartLocked(client));
+}
+async function firstStartLocked(client: PoolClient): Promise<void> {
   try {
     await client.query('begin');
-    await client.query(LOCK);   // два api разом (перезапуск внахлёст) не посадят демо дважды
     const c = (await client.query(
       'select (select count(*) from users)::int as users, (select count(*) from tasks)::int as tasks, (select count(*) from tags)::int as tags',
     )).rows[0];
@@ -383,26 +409,73 @@ export async function firstStart(pool: Pool): Promise<void> {
   } catch (e) {
     await client.query('rollback').catch(() => {});
     throw e;
-  } finally {
-    client.release();
   }
 }
 
 // Сбросить всё и посадить демо заново — одной транзакцией: при сбое база остаётся как была.
 export async function resetDemo(pool: Pool, keepEmails: string[]): Promise<Seeded & { password: string; saveError: string | null }> {
-  const client = await pool.connect();
-  try {
-    await client.query('begin');
-    await client.query(LOCK);
-    await wipeForDemo(client, keepEmails);
-    const password = newPassword();
-    const seeded = await seedDemo(client, password);
-    const saveError = await commitWithNote(client, { login: 'admin', password, user_id: seeded.adminId, demo: true });
-    return { ...seeded, password, saveError };
-  } catch (e) {
-    await client.query('rollback').catch(() => {});
-    throw e;
-  } finally {
-    client.release();
+  return withFirstStartLock(pool, async (client) => {
+    try {
+      await client.query('begin');
+      await wipeForDemo(client, keepEmails);
+      const password = newPassword();
+      const seeded = await seedDemo(client, password);
+      const saveError = await commitWithNote(client, { login: 'admin', password, user_id: seeded.adminId, demo: true });
+      return { ...seeded, password, saveError };
+    } catch (e) {
+      await client.query('rollback').catch(() => {});
+      throw e;
+    }
+  });
+}
+
+// НОВЫЙ ПАРОЛЬ АДМИНИСТРАТОРУ, НИЧЕГО НЕ СТИРАЯ (scripts/admin-password.sh, проверка 16.11).
+// Кого: логин из аргумента; без него — admin (демо), а если такого нет — ADMIN_EMAIL из .env (DEMO_SEED=0).
+// Только включённый администратор и не учётка телеграм-агента. Под общим замком, записка — как при первом
+// запуске (.pending → commit → .first-login). Все прежние входы этого человека обрываются: поколение +1.
+export type AdminTarget = { id: string; email: string } | { refuse: string };
+export async function findAdminTarget(c: PoolClient, wanted: string, keepEmails: string[]): Promise<AdminTarget> {
+  const col = (await c.query(
+    `select 1 from information_schema.columns where table_name = 'users' and column_name = 'token_version'`,
+  )).rowCount;
+  if (!col) {
+    return { refuse: 'Таска ещё работает на прежнем коде (после обновления api не перезапускали). ' +
+      'Сначала: docker compose restart api — потом повторите эту команду.' };
   }
+  const want = wanted.trim().toLowerCase();
+  const logins = want ? [want] : ['admin', envClean(process.env.ADMIN_EMAIL).toLowerCase() || 'admin@example.com'];
+  const admins = (await c.query(
+    `select email from users where role = 'admin' and active and lower(email) <> all($1::text[]) order by email`,
+    [keepEmails],
+  )).rows.map((r) => r.email as string);
+  const hint = admins.length
+    ? `Включённые администраторы в Таске: ${admins.join(', ')}. Нужен другой — укажите логин: bash scripts/admin-password.sh <логин>`
+    : 'Включённых администраторов в Таске нет.';
+  for (const login of logins) {
+    const u = (await c.query('select id, email, role, active from users where lower(email) = $1', [login])).rows[0];
+    if (!u) continue;
+    if (keepEmails.includes(login)) return { refuse: `«${u.email}» — служебная учётка телеграм-агента, ей пароль здесь не меняют (bash scripts/agent-account.sh). ${hint}` };
+    if (u.role !== 'admin') return { refuse: `«${u.email}» — не администратор. ${hint}` };
+    if (!u.active) return { refuse: `«${u.email}» выключен в «Команде» — с ним не войти и с новым паролем. ${hint}` };
+    return { id: u.id, email: u.email };
+  }
+  return { refuse: `Учётки ${want ? `«${want}»` : '«admin»'} в Таске нет. ${hint}` };
+}
+export async function setAdminPassword(pool: Pool, wanted: string, keepEmails: string[]):
+  Promise<{ refuse: string } | { login: string; password: string; saveError: string | null }> {
+  return withFirstStartLock(pool, async (client) => {
+    try {
+      await client.query('begin');
+      const t = await findAdminTarget(client, wanted, keepEmails);
+      if ('refuse' in t) { await client.query('rollback'); return t; }
+      const password = newPassword();
+      await client.query('update users set password_hash = $1, token_version = token_version + 1 where id = $2',
+        [hashPassword(password), t.id]);
+      const saveError = await commitWithNote(client, { login: t.email, password, user_id: t.id, demo: t.email === 'admin' });
+      return { login: t.email, password, saveError };
+    } catch (e) {
+      await client.query('rollback').catch(() => {});
+      throw e;
+    }
+  });
 }

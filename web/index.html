@@ -964,7 +964,14 @@ async function api(path, opts={}) {
   const data = await r.json().catch(()=>({}));
   // 401 разлогинивает ТОЛЬКО если токен не сменился за время запроса. Иначе устаревший ответ (со старым токеном —
   // напр. от «страничного» start() до перелогина) снёс бы свежую сессию → моргание входа и «случайный» вход.
-  if (r.status === 401) { if (token === reqTok) logout('Сессия истекла — войдите ещё раз.'); throw new Error('unauthorized'); }
+  if (r.status === 401) {
+    // Другая вкладка этого же браузера уже получила новый вход (человек сменил свой пароль — прежние входы
+    // сервер обрывает, проверка 16.11): берём его, а не выкидываем на экран входа и не стираем общий токен.
+    let shared=''; try{ shared=localStorage.getItem('canvas_token')||''; }catch(e){}
+    if (token === reqTok && shared && shared !== reqTok && isJwt(shared)) token = shared;
+    else if (token === reqTok) logout('Сессия истекла — войдите ещё раз.');
+    throw new Error('unauthorized');
+  }
   if (!r.ok || data.ok === false) throw new Error(data.error || ('HTTP '+r.status));
   return data;
 }
@@ -4047,7 +4054,10 @@ async function openProfileCard(userId){
     { const rl=document.getElementById('pfRole'); if(rl && !rl.disabled && rl.value!==u.role) body.role=rl.value; }   // роль меняет только администратор и не себе
     if(latinBad(body.email)||latinBad(body.password)){ showToast('Логин и пароль — только латиница, цифры и знаки. Русские буквы нельзя.', 6000); return; }
     if(!Object.keys(body).length){ closeModal(); return; }
-    try{ await api('/api/users/'+u.id,{method:'PATCH',body:JSON.stringify(body)}); usersCache=null; closeModal(); if(u.id===(me&&me.id)) refreshMe(); await reload(); }
+    try{ const d=await api('/api/users/'+u.id,{method:'PATCH',body:JSON.stringify(body)});
+      // сменил свой пароль — сервер оборвал все прежние входы и выдал этому новый токен (проверка 16.11)
+      if(d&&d.token){ token=d.token; _sessionTok=token; try{ localStorage.setItem('canvas_token', token); }catch(e){} }
+      usersCache=null; closeModal(); if(u.id===(me&&me.id)) refreshMe(); await reload(); }
     catch(e){ showToast('Ошибка: '+e.message); }
   };
 }

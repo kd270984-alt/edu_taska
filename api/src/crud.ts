@@ -1,6 +1,6 @@
 import type { Express, Response } from 'express';
 import type { Pool } from 'pg';
-import { requireAuth, requireRole, hashPassword, verifyToken, type AuthedRequest, type JwtUser } from './auth.ts';
+import { requireAuth, requireRole, hashPassword, sessionUser, signToken, sessionCookie, type AuthedRequest, type JwtUser } from './auth.ts';
 import { sanitizeDescription } from './html.ts';
 import { forgetFirstLogin } from './demo-seed.ts';
 import * as Minio from 'minio';
@@ -691,12 +691,26 @@ export function registerCrud(app: Express, pool: Pool): void {
         params.push(body.active); sets.push(`active = $${params.length}`);
       }
       if (!sets.length) return fail(res, 400, 'no fields to update');
+      // Сменили пароль или выключили человека — все прежние входы под этим логином перестают действовать:
+      // поколение входов растёт на 1 (auth.ts, миграция 0006, проверка 16.11). Включение обратно старые входы
+      // не возвращает — войти заново по паролю.
+      const newPw = typeof body.password === 'string' && !!body.password;
+      if (newPw || (isAdmin && body.active === false)) sets.push('token_version = token_version + 1');
       params.push(req.params.id);
-      const r = await pool.query(`update users set ${sets.join(', ')} where id = $${params.length} returning id, name, email, role, active, avatar_key, avatar_no`, params);
+      const r = await pool.query(`update users set ${sets.join(', ')} where id = $${params.length} returning id, name, email, role, active, avatar_key, avatar_no, token_version`, params);
       if (!r.rows[0]) return fail(res, 404, 'not found');
+      const { token_version: tv, ...user } = r.rows[0];
       // пароль сменили — записка первого входа (api/.first-login) с прежним паролем больше не нужна
-      if (typeof body.password === 'string' && body.password) forgetFirstLogin(r.rows[0].id);
-      res.json({ ok: true, user: r.rows[0] });
+      if (newPw) forgetFirstLogin(user.id);
+      // Сменил СВОЙ пароль — свой текущий вход сохраняем: тут же выдаём новый токен (и резервную куку).
+      // Все остальные его входы (другие устройства, посторонний) с этой минуты не действуют.
+      if (newPw && self) {
+        const token = signToken({ id: user.id, email: user.email, role: user.role, name: user.name, tv: Number(tv) });
+        res.setHeader('Set-Cookie', sessionCookie(token));
+        res.json({ ok: true, user, token });
+        return;
+      }
+      res.json({ ok: true, user });
     } catch (e) { oops(res, e); }
   });
   // аватарка: загрузка (админ любому, каждый себе) и отдача
@@ -726,7 +740,7 @@ export function registerCrud(app: Express, pool: Pool): void {
     try {
       const h = req.headers.authorization || '';
       const tk = (h.startsWith('Bearer ') ? h.slice(7) : '') || String((req.query as { tk?: string }).tk || '');
-      if (!verifyToken(tk)) return fail(res, 401, 'unauthorized');
+      if (!(await sessionUser(tk))) return fail(res, 401, 'unauthorized');   // сверка с базой, как у всех запросов (проверка 16.11)
       const r = await pool.query('select avatar_key from users where id = $1', [req.params.id]);
       if (!r.rows[0] || !r.rows[0].avatar_key) return fail(res, 404, 'no avatar');
       await ensureBucket();

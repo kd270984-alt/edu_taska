@@ -9,6 +9,8 @@ import {
   loginFingerprint,
   signToken,
   verifyToken,
+  sessionUser,
+  useSessionStore,
   sessionCookie,
   clearedSessionCookie,
   readCookie,
@@ -21,6 +23,7 @@ import { registerCrm } from './crm.ts';
 import { firstStart } from './demo-seed.ts';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+useSessionStore(pool);   // сессии сверяются с базой на каждом запросе (auth.ts, проверка 16.11)
 
 const app = express();
 // ⚠️ За Caddy настоящий адрес клиента приходит в X-Forwarded-For. Доверяем ОДНОМУ хопу —
@@ -125,7 +128,7 @@ app.post('/api/auth/login', async (req, res) => {
     // форму, только если она указывает РОВНО на одного человека — иначе просим полный адрес.
     const short = !login.includes('@');
     const r = await pool.query(
-      `select id, name, email, role, password_hash, active from users
+      `select id, name, email, role, password_hash, active, token_version from users
         where lower(email) = $1
            or ($2 and lower(split_part(email, '@', 1)) = $1)
         order by (lower(email) = $1) desc, created_at
@@ -140,7 +143,7 @@ app.post('/api/auth/login', async (req, res) => {
     if (!u && !ambiguous) {
       const fp = loginFingerprint(login.split('@')[0]);
       if (fp.length >= 4) {
-        const all = await pool.query('select id, name, email, role, password_hash, active from users');
+        const all = await pool.query('select id, name, email, role, password_hash, active, token_version from users');
         const near = all.rows.filter((z) => loginFingerprint(String(z.email).split('@')[0]) === fp);
         if (near.length === 1) u = near[0];
         else if (near.length > 1) ambiguous = true;
@@ -167,7 +170,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
     console.log(`login OK ${u.email} ip=${ip}`);
     const user = { id: u.id, email: u.email, role: u.role, name: u.name };
-    const token = signToken(user);
+    const token = signToken({ ...user, tv: Number(u.token_version) });   // поколение входов — проверка 16.11
     res.setHeader('Set-Cookie', sessionCookie(token));   // резервная копия сессии на случай чистки localStorage в мобильном браузере
     res.json({ ok: true, token, user });
   } catch (e) {
@@ -187,23 +190,24 @@ app.get('/api/auth/me', async (req: AuthedRequest, res) => {
     // поэтому чужой странице нельзя дать ни малейшего шанса вычитать по куке свежий токен.
     const origin = String(req.headers.origin || '');
     const sameSite = !origin || origin === `https://${req.headers.host}` || origin === `http://${req.headers.host}`;
-    const jwtUser = (bearer && verifyToken(bearer)) || (sameSite ? verifyToken(readCookie(req.headers.cookie, SESSION_COOKIE)) : null);
-    if (!jwtUser) {
+    const tok = bearer && verifyToken(bearer) ? bearer : (sameSite ? readCookie(req.headers.cookie, SESSION_COOKIE) : '');
+    if (!tok || !verifyToken(tok)) {
       res.setHeader('Set-Cookie', clearedSessionCookie());
       res.status(401).json({ ok: false, error: 'unauthorized' });
       return;
     }
-    // сверяем с БД: заблокированный (active=false) вылетает при следующей загрузке, не дожидаясь истечения JWT
-    const r = await pool.query('select id, name, email, role, active, avatar_key, avatar_no, settings from users where id = $1', [jwtUser.id]);
-    const u = r.rows[0];
-    if (!u || !u.active) {
+    // сверяем с БД: заблокированный (active=false) или сменивший пароль (другое поколение входов, проверка 16.11)
+    // вылетает сразу, не дожидаясь истечения JWT
+    const ok = await sessionUser(tok);
+    const u = ok ? (await pool.query('select id, name, email, role, active, token_version, avatar_key, avatar_no, settings from users where id = $1', [ok.id])).rows[0] : null;
+    if (!u || !u.active || Number(u.token_version) !== ok!.tv) {
       res.setHeader('Set-Cookie', clearedSessionCookie());
       res.status(401).json({ ok: false, error: 'доступ отключён' });
       return;
     }
     // ПРОДЛЕНИЕ СЕССИИ: на каждом запуске приложения выдаём свежий токен на полный срок.
     // Пока человек пользуется Таской хотя бы раз в 90 дней, его больше НИКОГДА не выкинет по истечении.
-    const fresh = signToken({ id: u.id, email: u.email, role: u.role, name: u.name });
+    const fresh = signToken({ id: u.id, email: u.email, role: u.role, name: u.name, tv: Number(u.token_version) });
     res.setHeader('Set-Cookie', sessionCookie(fresh));
     res.json({ ok: true, token: fresh, user: { id: u.id, name: u.name, email: u.email, role: u.role, avatar_key: u.avatar_key, avatar_no: u.avatar_no, settings: u.settings || {} } });
   } catch (e) {
@@ -244,8 +248,11 @@ const wss = new WebSocketServer({ noServer: true });
 server.on('upgrade', (req, socket, head) => {
   if (!req.url || !req.url.startsWith('/ws')) { socket.destroy(); return; }
   const tk = new URLSearchParams(String(req.url).split('?')[1] || '').get('tk') || '';
-  if (!verifyToken(tk) || wsClients.size >= WS_MAX) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
-  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  // токен сверяем с базой, как и все запросы (проверка 16.11): выгнанный не подписывается на сигналы
+  sessionUser(tk).then((u) => {
+    if (!u || wsClients.size >= WS_MAX) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  }, () => { try { socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n'); } catch { /* ignore */ } socket.destroy(); });
 });
 wss.on('connection', (ws: WebSocket) => {
   wsClients.add(ws);

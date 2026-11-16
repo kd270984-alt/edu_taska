@@ -12,7 +12,7 @@
 import type { Express, Response, NextFunction } from 'express';
 import type { Pool } from 'pg';
 import crypto from 'node:crypto';
-import { requireAuth, verifyToken, signToken, type AuthedRequest } from './auth.ts';
+import { requireAuth, sessionUser, signToken, type AuthedRequest } from './auth.ts';
 
 const AGENT_EMAIL = (process.env.AGENT_EMAIL || '').toLowerCase();
 const CODE_TTL_MIN = 10;
@@ -27,11 +27,13 @@ export function agentOnBehalf(pool: Pool) {
     const tgId = String(req.headers['x-telegram-id'] || '').trim();
     if (!tgId) { next(); return; }
     const h = req.headers.authorization || '';
-    const caller = h.startsWith('Bearer ') ? verifyToken(h.slice(7)) : null;
-    if (!caller || !isAgentEmail(caller.email)) { next(); return; }   // заголовок от НЕ агента не значит ничего
     try {
+      // вход агента сверяем с базой, как любой другой (проверка 16.11): выключенный или сменивший пароль агент
+      // ни за кого не работает
+      const caller = h.startsWith('Bearer ') ? await sessionUser(h.slice(7)) : null;
+      if (!caller || !isAgentEmail(caller.email)) { next(); return; }   // заголовок от НЕ агента не значит ничего
       const r = await pool.query(
-        `select u.id, u.email, u.role, u.name, u.active
+        `select u.id, u.email, u.role, u.name, u.active, u.token_version
            from telegram_links l join users u on u.id = l.user_id
           where l.telegram_id = $1`, [tgId]);
       const u = r.rows[0];
@@ -39,7 +41,7 @@ export function agentOnBehalf(pool: Pool) {
         res.status(403).json({ ok: false, error: 'Этот телеграм не привязан к пользователю Таски' });
         return;
       }
-      req.headers.authorization = 'Bearer ' + signToken({ id: u.id, email: u.email, role: u.role, name: u.name });
+      req.headers.authorization = 'Bearer ' + signToken({ id: u.id, email: u.email, role: u.role, name: u.name, tv: Number(u.token_version) });
       next();
     } catch (e) {
       res.status(500).json({ ok: false, error: (e as Error).message });

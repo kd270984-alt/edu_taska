@@ -4,18 +4,22 @@
 //   docker compose exec -T api node_modules/.bin/tsx src/demo-cli.ts count   — сколько сейчас людей, задач и вложений
 //   docker compose exec -T -e KEEP_EMAIL=agent@taska.local api node_modules/.bin/tsx src/demo-cli.ts reset
 //                                                                            — стереть всё и посадить демо-команду заново
+//   … demo-cli.ts password-check [логин] — кому admin-password.sh задаст пароль (ничего не меняет)
+//   … demo-cli.ts password [логин]       — новый пароль администратору, ничего не стирая (проверка 16.11);
+//                                          прежние входы под этим логином обрываются; ответ — те же три строки
 // show --log: на вход (stdin) — строки ADMIN_BOOTSTRAP из журнала api; так зовёт scripts/first-login.sh.
 //   Если записки нет, а при запуске её сохранить не удалось, пароль ищется там, сверяется с базой
 //   и перекладывается в записку (независимая проверка 16.11).
-// Коды выхода: 0 — готово; 3 — записки с паролем нет или пароль из неё больше не подходит (записка стёрта);
+// Коды выхода: 0 — готово; 3 — записки с паролем нет или пароль из неё больше не подходит (записка стёрта),
+//              у password — отказ (нет такого администратора и т. п., почему — в stderr);
 //              4 — строки входа напечатаны, но записку сохранить не удалось — перепишите пароль сейчас;
 //              1 — ошибка; 2 — неизвестная команда.
 import fs from 'node:fs';
 import { Pool, type PoolClient } from 'pg';
 import { verifyPassword } from './auth.ts';
 import {
-  LOCK, PENDING_FILE, appUrl, dropPendingFirstLogin, forgetFirstLogin, plural, promoteFirstLogin,
-  readFirstLogin, resetDemo, saveFirstLogin, tasksText, type FirstLogin,
+  PENDING_FILE, appUrl, dropPendingFirstLogin, findAdminTarget, forgetFirstLogin, plural, promoteFirstLogin,
+  readFirstLogin, resetDemo, saveFirstLogin, setAdminPassword, tasksText, withFirstStartLock, type FirstLogin,
 } from './demo-seed.ts';
 
 const cmd = process.argv[2] || 'show';
@@ -29,14 +33,15 @@ const keep = [...new Set([process.env.KEEP_EMAIL, process.env.AGENT_EMAIL]
   .map((v) => v.replace(/(^|\s)#.*$/, '').trim().toLowerCase())
   .filter(Boolean))];
 
-// Что делать, когда пароля нет (независимая проверка 16.11): человеку — «Мои доступы»; стирать всё —
-// только после «да» человека; где ещё искать пароль, не подсказываем (курс просит помощника этого не показывать).
+// Что делать, когда пароля нет (независимая проверка 16.11): человеку — «Мои доступы»; новый пароль или
+// стирание — только после «да» человека; где ещё искать пароль, не подсказываем (курс просит помощника этого не показывать).
+// Проверка 16.11: первым — новый пароль без стирания (admin-password.sh), стирание всего — только когда своего нет.
 const WHAT_NOW =
   'Что делать: войдите с паролем администратора, который сохранили в «Мои доступы». ' +
-  'Если его там нет, а своего в Таске ещё ничего нет, можно начать заново с новым паролем: bash scripts/demo-reset.sh — ' +
-  'он стирает ВСЁ (людей, задачи, вложения). Помощник: сами не запускайте — сначала спросите человека, согласен ли он ' +
-  'стереть всё, и только после его «да» добавьте --yes. Если своё в Таске уже есть — ничего не стирайте: ' +
-  'пароль администратору может задать другой администратор в «Команде», на занятии поможет ведущий.';
+  'Если его там нет — задайте администратору новый пароль, ничего не стирая: bash scripts/admin-password.sh ' +
+  '(люди, задачи и вложения остаются; прежний пароль и все открытые входы под этим логином перестают действовать). ' +
+  'Помощник: сами не запускайте — сначала спросите человека, согласен ли он сменить пароль администратора, ' +
+  'и только после его «да» добавьте --yes. Стирать всё (bash scripts/demo-reset.sh) для этого не нужно.';
 
 // Строки ADMIN_BOOTSTRAP с паролем (когда записку сохранить не удалось): «вход admin, пароль X — …»
 // и «login=… temp_password=…» (и прежний «email=… temp_password=…»). Новые — первыми.
@@ -60,13 +65,11 @@ async function owner(c: PoolClient, rec: FirstLogin | 'broken'): Promise<{ id: s
 // Под тем же замком, что посадка и сброс (независимая проверка 16.11): пока они идут, show ждёт —
 // и не стирает записку про ещё не закоммиченного администратора.
 async function show(logText: string): Promise<void> {
-  const c = await pool.connect();
-  let out: { login: string; password: string } | null = null;
+  let out = null as { login: string; password: string } | null;   // «as»: присваивается внутри замка (замыкание)
   let warn = '';
   let stale = false;
-  try {
-    await c.query('begin');
-    await c.query(LOCK);
+  // замок соединения (проверка 16.11): посадка и сброс держат его до конца переименования записки
+  await withFirstStartLock(pool, async (c) => {
     // 1) записка «до commit»: commit прошёл — переложить на место, не прошёл — выбросить
     const pend = readFirstLogin(PENDING_FILE);
     if (pend) {
@@ -98,13 +101,7 @@ async function show(logText: string): Promise<void> {
         break;
       }
     }
-    await c.query('commit');
-  } catch (e) {
-    await c.query('rollback').catch(() => {});
-    throw e;
-  } finally {
-    c.release();
-  }
+  });
   if (out) {
     console.log(lines(out.login, out.password));
     if (warn) {
@@ -145,8 +142,24 @@ try {
       console.log(lines('admin', r.password));
       process.exitCode = 4;
     }
+  } else if (cmd === 'password-check') {
+    // кому admin-password.sh задаст пароль — чтобы спросить человека заранее; ничего не меняет
+    const t = await withFirstStartLock(pool, (c) => findAdminTarget(c, process.argv[3] || '', keep));
+    if ('refuse' in t) { console.error(t.refuse); process.exitCode = 3; }
+    else console.log(t.email);
+  } else if (cmd === 'password') {
+    const r = await setAdminPassword(pool, process.argv[3] || '', keep);
+    if ('refuse' in r) { console.error(r.refuse); process.exitCode = 3; }
+    else {
+      console.log(lines(r.login, r.password));
+      if (r.saveError) {
+        console.error(`⚠️ Записку с паролем (api/.first-login) сохранить не удалось: ${r.saveError}. ` +
+          'Перепишите пароль в «Мои доступы» сейчас — второй раз его не показать.');
+        process.exitCode = 4;
+      }
+    }
   } else {
-    console.error(`неизвестная команда «${cmd}». Есть: show, count, reset`);
+    console.error(`неизвестная команда «${cmd}». Есть: show, count, reset, password-check, password`);
     process.exitCode = 2;
   }
 } catch (e) {

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import type { Request, Response, NextFunction } from 'express';
+import type { Pool } from 'pg';
 
 // --- Пароли: scrypt (встроен в Node, без нативных сборок) ---
 export function hashPassword(password: string): string {
@@ -62,13 +63,16 @@ export interface JwtUser {
   email: string;
   role: string;
   name: string;
+  // поколение входов (users.token_version, миграция 0006, проверка 16.11). В старых токенах его нет — это 0.
+  tv?: number;
 }
 // Срок жизни сессии. Было 7 дней БЕЗ продления — ровно через неделю приложение молча выкидывало
 // всех до единого (и телефон, и десктоп), человек читал это как «сломался пароль».
 // Теперь 90 дней + продление на каждом запуске приложения (/api/auth/me отдаёт свежий токен).
 export const TOKEN_DAYS = 90;
-export function signToken(u: JwtUser): string {
-  return jwt.sign(u, SECRET, { expiresIn: `${TOKEN_DAYS}d` });
+// tv обязателен: токен без поколения после первой же смены пароля молча не работал бы (проверка 16.11)
+export function signToken(u: JwtUser & { tv: number }): string {
+  return jwt.sign({ id: u.id, email: u.email, role: u.role, name: u.name, tv: u.tv }, SECRET, { expiresIn: `${TOKEN_DAYS}d` });
 }
 
 // Резервная копия сессии в HttpOnly-куке. Нужна из-за мобильных браузеров: iOS Safari чистит
@@ -98,6 +102,32 @@ export function verifyToken(token: string): JwtUser | null {
   }
 }
 
+// --- Сессия сверяется с базой (проверка 16.11) ---
+// Подписи токена мало: JWT живёт 90 дней и сам продлевается, поэтому смена пароля, выключение сотрудника
+// и закрытие старого общего пароля 123456 раньше НЕ выгоняли того, кто уже вошёл (в том числе постороннего
+// на открытом адресе). Теперь каждый запрос сверяет токен с базой: человек есть, включён и поколение входов
+// (tv в токене) совпадает с users.token_version. Сменили пароль или выключили — поколение растёт на 1,
+// и все прежние входы под этим логином перестают действовать. Роль и имя берутся из базы, а не из токена:
+// разжалованный администратор теряет права сразу, а не через 90 дней.
+// Запрос к базе на каждый запрос — Таска маленькая, это дёшево.
+let sessionPool: Pool | null = null;
+export function useSessionStore(pool: Pool): void {
+  sessionPool = pool;
+}
+export type SessionUser = JwtUser & { tv: number };
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export async function sessionUser(token: string): Promise<SessionUser | null> {
+  const t = token ? verifyToken(token) : null;
+  if (!t || typeof t.id !== 'string' || !UUID_RE.test(t.id)) return null;
+  if (!sessionPool) throw new Error('useSessionStore не вызван');
+  const u = (await sessionPool.query(
+    'select id, email, role, name, active, token_version from users where id = $1',
+    [t.id],
+  )).rows[0];
+  if (!u || !u.active || Number(u.token_version) !== Number(t.tv ?? 0)) return null;
+  return { id: u.id, email: u.email, role: u.role, name: u.name, tv: Number(u.token_version) };
+}
+
 // --- Middleware ---
 export interface AuthedRequest extends Request {
   user?: JwtUser;
@@ -105,13 +135,20 @@ export interface AuthedRequest extends Request {
 export function requireAuth(req: AuthedRequest, res: Response, next: NextFunction): void {
   const h = req.headers.authorization || '';
   const token = h.startsWith('Bearer ') ? h.slice(7) : '';
-  const u = token ? verifyToken(token) : null;
-  if (!u) {
-    res.status(401).json({ ok: false, error: 'unauthorized' });
-    return;
-  }
-  req.user = u;
-  next();
+  sessionUser(token).then(
+    (u) => {
+      if (!u) {
+        res.status(401).json({ ok: false, error: 'unauthorized' });
+        return;
+      }
+      req.user = u;
+      next();
+    },
+    (e) => {
+      console.error('auth error:', (e as Error).message);
+      res.status(500).json({ ok: false, error: 'внутренняя ошибка' });
+    },
+  );
 }
 export function requireRole(...roles: string[]) {
   return (req: AuthedRequest, res: Response, next: NextFunction): void => {
