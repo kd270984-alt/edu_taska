@@ -51,7 +51,8 @@ sure(){ # стирание — только с явным согласием
     case "$a" in д|да|Да|ДА|y|Y|yes) return 0 ;; esac
     echo "Отменено."; exit 1
   fi
-  echo "$1 Чтобы подтвердить, добавьте --yes: bash scripts/crm-demo.sh $CMD --yes" >&2; exit 1
+  # независимая проверка 16.11: согласие даёт человек, не помощник (как restore.sh и demo-reset.sh)
+  echo "$1 Ничего не изменено. Помощник: остановитесь и спросите человека; только после его «да» повторите: bash scripts/crm-demo.sh $CMD --yes" >&2; exit 1
 }
 
 case "$CMD" in

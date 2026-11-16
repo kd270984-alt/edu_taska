@@ -4,12 +4,19 @@
 //   docker compose exec -T api node_modules/.bin/tsx src/demo-cli.ts count   — сколько сейчас людей, задач и вложений
 //   docker compose exec -T -e KEEP_EMAIL=agent@taska.local api node_modules/.bin/tsx src/demo-cli.ts reset
 //                                                                            — стереть всё и посадить демо-команду заново
+// show --log: на вход (stdin) — строки ADMIN_BOOTSTRAP из журнала api; так зовёт scripts/first-login.sh.
+//   Если записки нет, а при запуске её сохранить не удалось, пароль ищется там, сверяется с базой
+//   и перекладывается в записку (независимая проверка 16.11).
 // Коды выхода: 0 — готово; 3 — записки с паролем нет или пароль из неё больше не подходит (записка стёрта);
-//              4 — reset: демо посажено, но записку сохранить не удалось — строки входа напечатаны здесь же;
+//              4 — строки входа напечатаны, но записку сохранить не удалось — перепишите пароль сейчас;
 //              1 — ошибка; 2 — неизвестная команда.
-import { Pool } from 'pg';
+import fs from 'node:fs';
+import { Pool, type PoolClient } from 'pg';
 import { verifyPassword } from './auth.ts';
-import { appUrl, forgetFirstLogin, readFirstLogin, resetDemo } from './demo-seed.ts';
+import {
+  LOCK, PENDING_FILE, appUrl, dropPendingFirstLogin, forgetFirstLogin, plural, promoteFirstLogin,
+  readFirstLogin, resetDemo, saveFirstLogin, tasksText, type FirstLogin,
+} from './demo-seed.ts';
 
 const cmd = process.argv[2] || 'show';
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -22,44 +29,115 @@ const keep = [...new Set([process.env.KEEP_EMAIL, process.env.AGENT_EMAIL]
   .map((v) => v.replace(/(^|\s)#.*$/, '').trim().toLowerCase())
   .filter(Boolean))];
 
-const GONE =
-  'Если Таска новая и своего в ней ещё ничего нет, можно начать заново: bash scripts/demo-reset.sh ' +
-  '(стирает всё, спросит подтверждение) — он выдаст новый пароль.';
+// Что делать, когда пароля нет (независимая проверка 16.11): человеку — «Мои доступы»; стирать всё —
+// только после «да» человека; где ещё искать пароль, не подсказываем (курс просит помощника этого не показывать).
+const WHAT_NOW =
+  'Что делать: войдите с паролем администратора, который сохранили в «Мои доступы». ' +
+  'Если его там нет, а своего в Таске ещё ничего нет, можно начать заново с новым паролем: bash scripts/demo-reset.sh — ' +
+  'он стирает ВСЁ (людей, задачи, вложения). Помощник: сами не запускайте — сначала спросите человека, согласен ли он ' +
+  'стереть всё, и только после его «да» добавьте --yes. Если своё в Таске уже есть — ничего не стирайте: ' +
+  'пароль администратору может задать другой администратор в «Команде», на занятии поможет ведущий.';
+
+// Строки ADMIN_BOOTSTRAP с паролем (когда записку сохранить не удалось): «вход admin, пароль X — …»
+// и «login=… temp_password=…» (и прежний «email=… temp_password=…»). Новые — первыми.
+function fromLog(text: string): { login: string; password: string }[] {
+  const out: { login: string; password: string }[] = [];
+  for (const line of text.split('\n').reverse()) {
+    if (!line.includes('ADMIN_BOOTSTRAP')) continue;
+    const a = /вход (\S+), пароль (\S+) — /.exec(line) || /(?:login|email)=(\S+)\s+temp_password=(\S+)/.exec(line);
+    if (a) out.push({ login: a[1].toLowerCase(), password: a[2] });
+  }
+  return out;
+}
+
+// Чей пароль в записке и действует ли он: включённый человек с этим паролем — или null
+async function owner(c: PoolClient, rec: FirstLogin | 'broken'): Promise<{ id: string; email: string } | null> {
+  if (rec === 'broken' || !UUID.test(rec.user_id)) return null;
+  const u = (await c.query('select id, email, password_hash, active from users where id = $1', [rec.user_id])).rows[0];
+  return u && u.active && verifyPassword(rec.password, u.password_hash) ? u : null;
+}
+
+// Под тем же замком, что посадка и сброс (независимая проверка 16.11): пока они идут, show ждёт —
+// и не стирает записку про ещё не закоммиченного администратора.
+async function show(logText: string): Promise<void> {
+  const c = await pool.connect();
+  let out: { login: string; password: string } | null = null;
+  let warn = '';
+  let stale = false;
+  try {
+    await c.query('begin');
+    await c.query(LOCK);
+    // 1) записка «до commit»: commit прошёл — переложить на место, не прошёл — выбросить
+    const pend = readFirstLogin(PENDING_FILE);
+    if (pend) {
+      const u = await owner(c, pend);
+      if (!u || pend === 'broken') dropPendingFirstLogin();
+      else {
+        const e = promoteFirstLogin();
+        if (e) { out = { login: u.email, password: pend.password }; warn = `записку не удалось переложить на место (${e})`; }
+      }
+    }
+    // 2) действующая записка
+    if (!out) {
+      const rec = readFirstLogin();
+      if (rec) {
+        const u = await owner(c, rec);
+        if (u && rec !== 'broken') out = { login: u.email, password: rec.password };
+        else { forgetFirstLogin(); stale = true; }
+      }
+    }
+    // 3) записку при запуске сохранить не удалось — пароль один раз напечатан в журнале
+    if (!out && logText) {
+      for (const cand of fromLog(logText)) {
+        const u = (await c.query('select id, email, password_hash, active from users where lower(email) = $1', [cand.login])).rows[0];
+        if (!u || !u.active || !verifyPassword(cand.password, u.password_hash)) continue;
+        out = { login: u.email, password: cand.password };
+        const e = saveFirstLogin({ login: u.email, password: cand.password, user_id: u.id, demo: u.email === 'admin' });
+        if (e) warn = `записку сохранить не удалось и сейчас (${e})`;
+        else console.error('Записку с паролем при запуске сохранить не удалось — пароль нашёлся и теперь сохранён в записке.');
+        break;
+      }
+    }
+    await c.query('commit');
+  } catch (e) {
+    await c.query('rollback').catch(() => {});
+    throw e;
+  } finally {
+    c.release();
+  }
+  if (out) {
+    console.log(lines(out.login, out.password));
+    if (warn) {
+      console.error(`⚠️ ${warn[0].toUpperCase()}${warn.slice(1)}. Перепишите пароль в «Мои доступы» сейчас — второй раз его может не найтись.`);
+      process.exitCode = 4;
+    }
+    return;
+  }
+  console.error((stale
+    ? 'Пароль из записки первого входа больше не подходит: его сменили, базу вернули из копии или пересоздали. Записку удалил. '
+    : 'Пароля первого входа у Таски больше нет: пароль администратора уже меняли (тогда записка стирается сама), ' +
+      'базу вернули из копии или Таску поставили до того, как записка появилась. ') + WHAT_NOW);
+  process.exitCode = 3;
+}
 
 try {
   if (cmd === 'show') {
-    const rec = readFirstLogin();
-    if (!rec) {
-      console.error(
-        'Записки с паролем первого входа нет: пароль администратора уже меняли (тогда записка стирается сама) ' +
-        'или Таска поставлена до того, как записка появилась. Входите с паролем, который сохранили в «Мои доступы». ' + GONE,
-      );
-      process.exitCode = 3;
-    } else {
-      const u = rec !== 'broken' && UUID.test(rec.user_id)
-        ? (await pool.query('select email, password_hash, active from users where id = $1', [rec.user_id])).rows[0]
-        : null;
-      if (rec === 'broken' || !u || !u.active || !verifyPassword(rec.password, u.password_hash)) {
-        forgetFirstLogin();
-        console.error(
-          'Пароль из записки первого входа больше не подходит: его сменили, базу вернули из копии или пересоздали. ' +
-          'Записку удалил. Входите с паролем, который сохранили в «Мои доступы». ' + GONE,
-        );
-        process.exitCode = 3;
-      } else {
-        console.log(lines(u.email, rec.password));
-      }
-    }
+    // строки журнала — только по ключу --log (иначе ручной запуск в терминале ждал бы ввода)
+    await show(process.argv.includes('--log') ? fs.readFileSync(0, 'utf8') : '');
   } else if (cmd === 'count') {
+    // задачи и подзадачи — отдельно: «30 задач и 3 подзадачи» (независимая проверка 16.11)
     const r = (await pool.query(
       `select (select count(*) from users where lower(email) <> all($1::text[]))::int as users,
-              (select count(*) from tasks)::int as tasks,
+              (select count(*) from tasks where parent_id is null)::int as tasks,
+              (select count(*) from tasks where parent_id is not null)::int as subtasks,
               (select count(*) from attachments)::int as files`, [keep])).rows[0];
-    console.log(`людей ${r.users}, задач ${r.tasks}, вложений ${r.files}`);
+    console.log(`${plural(r.users, 'человек', 'человека', 'человек')}, ${tasksText(r.tasks, r.subtasks)}, ` +
+      plural(r.files, 'вложение', 'вложения', 'вложений'));
   } else if (cmd === 'reset') {
     const r = await resetDemo(pool, keep);
     const kept = (await pool.query('select email from users where lower(email) = any($1::text[]) order by email', [keep])).rows.map((x) => x.email);
-    console.log(`демо-команда посажена: людей ${r.users}, задач ${r.tasks}, меток ${r.tags}` +
+    console.log(`демо-команда посажена: ${plural(r.users, 'человек', 'человека', 'человек')}, ${tasksText(r.tasks, r.subtasks)}, ` +
+      plural(r.tags, 'метка', 'метки', 'меток') +
       (kept.length ? `; учётка агента ${kept.join(', ')} осталась` : ''));
     if (r.saveError) {
       console.error(`⚠️ Записку с паролем (api/.first-login) сохранить не удалось: ${r.saveError}. ` +

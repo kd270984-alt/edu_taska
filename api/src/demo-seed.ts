@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Pool, PoolClient } from 'pg';
-import { hashPassword } from './auth.ts';
+import { hashPassword, verifyPassword } from './auth.ts';
 import { sanitizeDescription } from './html.ts';
 
 // ПЕРВЫЙ ЗАПУСК И ДЕМО-КОМАНДА (решение владельца 15.11.2026).
@@ -24,6 +24,20 @@ import { sanitizeDescription } from './html.ts';
 //    Он в файле api/.first-login (в контейнере /app/.first-login), права 0600, в git не попадает.
 //    Показывает его только scripts/first-login.sh — то есть только тот, у кого есть доступ к серверу.
 //    Ни одного адреса в API, который отдаёт этот файл, нет и быть не должно.
+//    Запасной путь — только если записку сохранить не удалось (кончился диск и т. п.): тогда пароль
+//    один раз печатается в журнал, и scripts/first-login.sh сам находит его там, сверяет с базой
+//    и перекладывает в записку (независимая проверка 16.11).
+//
+// ⚠️ ЗАПИСКА — В ДВА ШАГА (независимая проверка 16.11). До commit она пишется в .first-login.pending,
+//    после commit — переименовывается в .first-login. Сбой commit не портит прежнюю действующую записку,
+//    а если процесс упал между commit и переименованием, demo-cli show под тем же замком сверит .pending
+//    с базой и доведёт дело. Пока идёт посадка или сброс, show ждёт замка — и не стирает записку
+//    про ещё не закоммиченного администратора.
+//
+// ⚠️ СТАРЫЕ УСТАНОВКИ (до 16.11, был шаг «Оживить» — старый demo-reset.sh с паролем 123456 у admin,
+//    manager и user). При каждом старте api под тем же замком: у manager и user с паролем 123456 вход
+//    закрывается (password_hash = NULL, задачи остаются), у admin с 123456 — новый случайный пароль и
+//    записка, как при первом запуске. Повторный старт ничего не меняет: 123456 уже нет.
 
 export const FIRST_LOGIN_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '.first-login');
 
@@ -38,8 +52,8 @@ export function newPassword(): string {
 
 // Записка пишется во временный файл и переименовывается: оборванная запись не оставит полфайла.
 // Возвращает текст ошибки или null.
-export function saveFirstLogin(rec: Omit<FirstLogin, 'created_at'>): string | null {
-  const tmp = FIRST_LOGIN_FILE + '.tmp';
+function writeNote(file: string, rec: Omit<FirstLogin, 'created_at'>): string | null {
+  const tmp = file + '.tmp';
   try {
     try { fs.unlinkSync(tmp); } catch { /* его и не было */ }
     const fd = fs.openSync(tmp, 'wx', 0o600);
@@ -50,7 +64,7 @@ export function saveFirstLogin(rec: Omit<FirstLogin, 'created_at'>): string | nu
       fs.closeSync(fd);
     }
     fs.chmodSync(tmp, 0o600);
-    fs.renameSync(tmp, FIRST_LOGIN_FILE);
+    fs.renameSync(tmp, file);
     return null;
   } catch (e) {
     try { fs.unlinkSync(tmp); } catch { /* ignore */ }
@@ -58,10 +72,28 @@ export function saveFirstLogin(rec: Omit<FirstLogin, 'created_at'>): string | nu
   }
 }
 
+// записка «до commit» (независимая проверка 16.11): действующей становится только после удачного commit
+export const PENDING_FILE = FIRST_LOGIN_FILE + '.pending';
+
+// сразу действующая записка — только для пароля, который уже точно в базе (show нашёл его в журнале)
+export function saveFirstLogin(rec: Omit<FirstLogin, 'created_at'>): string | null {
+  return writeNote(FIRST_LOGIN_FILE, rec);
+}
+export function stageFirstLogin(rec: Omit<FirstLogin, 'created_at'>): string | null {
+  return writeNote(PENDING_FILE, rec);
+}
+// после удачного commit: .pending → .first-login одним переименованием
+export function promoteFirstLogin(): string | null {
+  try { fs.renameSync(PENDING_FILE, FIRST_LOGIN_FILE); return null; } catch (e) { return (e as Error).message; }
+}
+export function dropPendingFirstLogin(): void {
+  try { fs.unlinkSync(PENDING_FILE); } catch { /* её и не было */ }
+}
+
 // null — записки нет; 'broken' — файл есть, но прочитать его нельзя
-export function readFirstLogin(): FirstLogin | null | 'broken' {
+export function readFirstLogin(file: string = FIRST_LOGIN_FILE): FirstLogin | null | 'broken' {
   let raw: string;
-  try { raw = fs.readFileSync(FIRST_LOGIN_FILE, 'utf8'); } catch { return null; }
+  try { raw = fs.readFileSync(file, 'utf8'); } catch { return null; }
   try {
     const r = JSON.parse(raw);
     if (r && typeof r.password === 'string' && typeof r.user_id === 'string') return r as FirstLogin;
@@ -70,14 +102,29 @@ export function readFirstLogin(): FirstLogin | null | 'broken' {
 }
 
 // Пароль сменили — записка больше не нужна. С userId стираем, только если записка про этого человека.
+// И действующую, и ещё не переложенную .pending (независимая проверка 16.11).
 export function forgetFirstLogin(userId?: string): void {
-  try {
-    if (userId) {
-      const r = readFirstLogin();
-      if (!r || (r !== 'broken' && r.user_id !== userId)) return;
-    }
-    fs.unlinkSync(FIRST_LOGIN_FILE);
-  } catch { /* записки нет — и хорошо */ }
+  for (const file of [FIRST_LOGIN_FILE, PENDING_FILE]) {
+    try {
+      if (userId) {
+        const r = readFirstLogin(file);
+        if (!r || (r !== 'broken' && r.user_id !== userId)) continue;
+      }
+      fs.unlinkSync(file);
+    } catch { /* записки нет — и хорошо */ }
+  }
+}
+
+// commit вместе с запиской (независимая проверка 16.11). Возвращает ошибку записи .pending
+// (тогда пароля нет нигде, кроме памяти вызывающего, — пусть покажет его сам) или null.
+// commit упал — .pending остаётся: commit мог и пройти, show сверит её с базой.
+async function commitWithNote(client: PoolClient, rec: Omit<FirstLogin, 'created_at'>): Promise<string | null> {
+  const err = stageFirstLogin(rec);
+  await client.query('commit');
+  if (err) return err;
+  const moved = promoteFirstLogin();
+  if (moved) console.error(`записку первого входа не удалось переложить на место (${moved}) — она в api/.first-login.pending, bash scripts/first-login.sh доведёт дело`);
+  return null;
 }
 
 // значение из .env без комментария в хвосте («APP_HOST=… # цифры своего сервера»)
@@ -103,7 +150,7 @@ export function demoSeedOn(): boolean {
   return !/^(0|off|no|false|нет)$/i.test(envClean(process.env.DEMO_SEED));
 }
 
-function plural(n: number, one: string, few: string, many: string): string {
+export function plural(n: number, one: string, few: string, many: string): string {
   const a = n % 10, b = n % 100;
   const w = a === 1 && b !== 11 ? one : a >= 2 && a <= 4 && (b < 12 || b > 14) ? few : many;
   return `${n} ${w}`;
@@ -163,7 +210,8 @@ const PLAN: Record<Who, Item[]> = {
 const ESTIMATE = 'Подготовить смету для «Уютного дома»';
 const SUBTASKS = ['Замерить помещение', 'Посчитать материалы', 'Отправить смету клиенту'];
 
-export type Seeded = { adminId: string; users: number; tasks: number; tags: number };
+// tasks — задачи верхнего уровня, subtasks — подзадачи: «30 задач и 3 подзадачи», как в курсе (независимая проверка 16.11)
+export type Seeded = { adminId: string; users: number; tasks: number; subtasks: number; tags: number };
 
 // Сажает демо-команду ВНУТРИ уже открытой транзакции (её открывает и закрывает вызывающий).
 // База должна быть пустой по людям, задачам и меткам — это проверяет вызывающий.
@@ -210,13 +258,14 @@ export async function seedDemo(client: PoolClient, adminPw: string): Promise<See
   }
   // подзадачи, комментарии, повторение — чтобы карточки были живыми
   const parent = task[`manager:${ESTIMATE}`];
+  let subtasks = 0;
   for (const name of SUBTASKS) {
     await client.query(
       `insert into tasks(name, due_date, assignee_id, author_id, parent_id, created_at)
        values($1, (now() at time zone $2)::date + 1, $3, $4, $5, clock_timestamp())`,
       [name, tz, id.user, id.manager, parent],
     );
-    tasks++;
+    subtasks++;
   }
   await client.query(
     `insert into comments(task_id, author_id, text, created_at) values
@@ -229,7 +278,7 @@ export async function seedDemo(client: PoolClient, adminPw: string): Promise<See
   // пара завершённых — чтобы архив не был пустым
   await client.query('update tasks set archived = true, completed_at = now() where id = any($1::uuid[])',
     [[task['manager:Отправить коммерческое предложение «Ремстрой»'], task['user:Позвонить клиенту по рекламации']]]);
-  return { adminId: id.admin, users: PEOPLE.length, tasks, tags: TAGS.length };
+  return { adminId: id.admin, users: PEOPLE.length, tasks, subtasks, tags: TAGS.length };
 }
 
 // Стирает людей (кроме keepEmails — учётки телеграм-агента), задачи, метки, комментарии и карточки вложений.
@@ -239,10 +288,42 @@ export async function wipeForDemo(client: PoolClient, keepEmails: string[]): Pro
   await client.query('delete from users where lower(email) <> all($1::text[])', [keepEmails.map((e) => e.toLowerCase())]);
 }
 
-const LOCK = `select pg_advisory_xact_lock(hashtext('taska_first_start'))`;
+// общий замок первого запуска, сброса демо и show (demo-cli) — независимая проверка 16.11
+export const LOCK = `select pg_advisory_xact_lock(hashtext('taska_first_start'))`;
+
+// «30 задач и 3 подзадачи»
+export function tasksText(tasks: number, subtasks: number): string {
+  return `${plural(tasks, 'задача', 'задачи', 'задач')} и ${plural(subtasks, 'подзадача', 'подзадачи', 'подзадач')}`;
+}
+
+// Общий пароль 123456 от прежнего шага «Оживить» (старый demo-reset.sh, до 16.11) — независимая проверка 16.11.
+// Внутри уже открытой транзакции под LOCK. manager и user (и выключенный admin) — вход закрыть: password_hash = NULL,
+// задачи остаются. Включённый admin — новый случайный пароль; записку пишет вызывающий. Повторно — ничего: 123456 уже нет.
+const OLD_DEMO_PASSWORD = '123456';
+async function closeOldDemoPasswords(client: PoolClient): Promise<{ closed: string[]; admin: { id: string; password: string } | null }> {
+  const rows = (await client.query(
+    `select id, lower(email) as login, active, password_hash from users
+      where lower(email) = any($1::text[]) and password_hash is not null order by lower(email)`,
+    [['admin', 'manager', 'user']],
+  )).rows as { id: string; login: string; active: boolean; password_hash: string }[];
+  const closed: string[] = [];
+  let admin: { id: string; password: string } | null = null;
+  for (const r of rows) {
+    if (!verifyPassword(OLD_DEMO_PASSWORD, r.password_hash)) continue;
+    if (r.login === 'admin' && r.active) {
+      const password = newPassword();
+      await client.query('update users set password_hash = $1 where id = $2', [hashPassword(password), r.id]);
+      admin = { id: r.id, password };
+    } else {
+      await client.query('update users set password_hash = null where id = $1', [r.id]);
+      closed.push(r.login);
+    }
+  }
+  return { closed, admin };
+}
 
 // При старте api, после миграций и до приёма запросов.
-//   людей уже есть                      → ничего не делаем (все, кто поставил Таску раньше, ничего не заметят);
+//   людей уже есть                      → только закрываем общий пароль 123456 от прежнего «Оживить» (см. выше);
 //   DEMO_SEED не 0 и нет задач и меток  → демо-команда;
 //   иначе (DEMO_SEED=0 или база вернулась из копии не целиком) → один администратор из ADMIN_EMAIL, как раньше.
 // Посадка демо упала — откат и один администратор: Таска запускается в любом случае.
@@ -254,7 +335,22 @@ export async function firstStart(pool: Pool): Promise<void> {
     const c = (await client.query(
       'select (select count(*) from users)::int as users, (select count(*) from tasks)::int as tasks, (select count(*) from tags)::int as tags',
     )).rows[0];
-    if (c.users > 0) { await client.query('commit'); return; }
+    if (c.users > 0) {
+      const old = await closeOldDemoPasswords(client);
+      if (old.admin) {
+        const err = await commitWithNote(client, { login: 'admin', password: old.admin.password, user_id: old.admin.id, demo: true });
+        const was = 'у admin был общий пароль 123456 (от прежнего шага «Оживить») — задан новый случайный';
+        if (!err) console.log(`ADMIN_BOOTSTRAP ${was}: адрес, логин и пароль — bash scripts/first-login.sh`);
+        else console.log(`ADMIN_BOOTSTRAP ${was}: вход admin, пароль ${old.admin.password} — записку api/.first-login сохранить не удалось (${err}), поэтому пароль здесь, один раз: перепишите его сейчас`);
+      } else {
+        await client.query('commit');
+      }
+      if (old.closed.length) {
+        console.log(`Вход ${old.closed.join(', ')} закрыт: был общий пароль 123456 (от прежнего шага «Оживить»). ` +
+          'Задачи остались; пароль, если нужен, задаёт администратор карандашом в «Команде».');
+      }
+      return;
+    }
 
     if (demoSeedOn() && c.tasks === 0 && c.tags === 0) {
       const pw = newPassword();
@@ -267,9 +363,8 @@ export async function firstStart(pool: Pool): Promise<void> {
         console.error(`DEMO_SEED не удалось: ${(e as Error).message} — завожу одного администратора, как при DEMO_SEED=0`);
       }
       if (seeded) {
-        const what = `демо-команда готова (${plural(seeded.users, 'человек', 'человека', 'человек')}, ${plural(seeded.tasks, 'задача', 'задачи', 'задач')}, ${plural(seeded.tags, 'метка', 'метки', 'меток')})`;
-        const err = saveFirstLogin({ login: 'admin', password: pw, user_id: seeded.adminId, demo: true });
-        await client.query('commit');
+        const what = `демо-команда готова (${plural(seeded.users, 'человек', 'человека', 'человек')}, ${tasksText(seeded.tasks, seeded.subtasks)}, ${plural(seeded.tags, 'метка', 'метки', 'меток')})`;
+        const err = await commitWithNote(client, { login: 'admin', password: pw, user_id: seeded.adminId, demo: true });
         if (!err) console.log(`ADMIN_BOOTSTRAP ${what}: вход admin — адрес, логин и пароль: bash scripts/first-login.sh`);
         else console.log(`ADMIN_BOOTSTRAP ${what}: вход admin, пароль ${pw} — записку api/.first-login сохранить не удалось (${err}), поэтому пароль здесь, один раз: перепишите его сейчас`);
         return;
@@ -282,8 +377,7 @@ export async function firstStart(pool: Pool): Promise<void> {
       `insert into users(name, email, password_hash, role, active) values($1,$2,$3,'admin',true) returning id`,
       ['Администратор', email, hashPassword(pw)],
     );
-    const err = saveFirstLogin({ login: email, password: pw, user_id: r.rows[0].id, demo: false });
-    await client.query('commit');
+    const err = await commitWithNote(client, { login: email, password: pw, user_id: r.rows[0].id, demo: false });
     if (!err) console.log(`ADMIN_BOOTSTRAP login=${email} — пароль: bash scripts/first-login.sh`);
     else console.log(`ADMIN_BOOTSTRAP login=${email} temp_password=${pw} — записку api/.first-login сохранить не удалось (${err}), поэтому пароль здесь, один раз: перепишите его сейчас`);
   } catch (e) {
@@ -303,8 +397,7 @@ export async function resetDemo(pool: Pool, keepEmails: string[]): Promise<Seede
     await wipeForDemo(client, keepEmails);
     const password = newPassword();
     const seeded = await seedDemo(client, password);
-    const saveError = saveFirstLogin({ login: 'admin', password, user_id: seeded.adminId, demo: true });
-    await client.query('commit');
+    const saveError = await commitWithNote(client, { login: 'admin', password, user_id: seeded.adminId, demo: true });
     return { ...seeded, password, saveError };
   } catch (e) {
     await client.query('rollback').catch(() => {});
