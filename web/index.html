@@ -952,11 +952,20 @@ const esc = s => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&l
 const isJwt = t => /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(t || '');
 let token = localStorage.getItem('canvas_token') || '';
 if (token && !isJwt(token)) { token=''; try{ localStorage.removeItem('canvas_token'); }catch(e){} }
+// id человека из токена (средняя часть JWT — base64url с JSON). Подпись здесь не проверяем — только
+// узнаём, чей это вход; проверяет сервер. Не разобрать — '' (такой токен ничьим не считаем).
+function jwtId(t){
+  try{
+    let b=String(t||'').split('.')[1]||''; b=b.replace(/-/g,'+').replace(/_/g,'/'); while(b.length%4) b+='=';
+    const bin=atob(b), bytes=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+    const p=JSON.parse(new TextDecoder().decode(bytes)); return (p&&typeof p.id==='string')?p.id:'';
+  }catch(e){ return ''; }
+}
 let me = null;
 let _sessionTok = null;   // токен, под которым УЖЕ поднято приложение (защита от гонок входа и дубля интервалов/WS)
    // единое пространство: пустой boardId → сервер использует дефолтную личную раскладку (досок больше нет)
 
-async function api(path, opts={}) {
+async function api(path, opts={}, _retried) {
   const h = Object.assign({'Content-Type':'application/json'}, opts.headers||{});
   const reqTok = token;   // токен, с которым уходит ИМЕННО ЭТОТ запрос
   if (reqTok && isJwt(reqTok)) h['Authorization'] = 'Bearer ' + reqTok;   // битый токен не отправляем: fetch на нём падает
@@ -965,11 +974,26 @@ async function api(path, opts={}) {
   // 401 разлогинивает ТОЛЬКО если токен не сменился за время запроса. Иначе устаревший ответ (со старым токеном —
   // напр. от «страничного» start() до перелогина) снёс бы свежую сессию → моргание входа и «случайный» вход.
   if (r.status === 401) {
-    // Другая вкладка этого же браузера уже получила новый вход (человек сменил свой пароль — прежние входы
-    // сервер обрывает, проверка 16.11): берём его, а не выкидываем на экран входа и не стираем общий токен.
+    // Другая вкладка этого же браузера уже получила новый вход ЭТОГО ЖЕ человека (он сменил свой пароль —
+    // прежние входы сервер обрывает, проверка 16.11): берём его и повторяем запрос один раз, а не выкидываем
+    // на экран входа и не стираем общий токен. Общий токен ДРУГОГО человека (в соседней вкладке вошли под
+    // другим логином) не берём никогда: иначе вкладка, где на экране X, молча действовала бы от имени Y.
     let shared=''; try{ shared=localStorage.getItem('canvas_token')||''; }catch(e){}
-    if (token === reqTok && shared && shared !== reqTok && isJwt(shared)) token = shared;
-    else if (token === reqTok) logout('Сессия истекла — войдите ещё раз.');
+    if (token === reqTok) {
+      const myId = (me && me.id) || jwtId(reqTok);
+      const sharedOk = shared && shared !== reqTok && isJwt(shared);
+      if (sharedOk && myId && jwtId(shared) === myId) {
+        token = shared;
+        if (!_retried) return api(path, opts, true);
+      } else if (sharedOk) {
+        // общий токен чужой — его не трогаем: в соседней вкладке им продолжает работать другой человек
+        logout('Ваш вход закрыт (пароль сменили или доступ отключили), а в другой вкладке этого браузера вошли под другим логином. Войдите ещё раз.', false, true);
+      } else logout('Сессия истекла — войдите ещё раз.');
+    } else if (!_retried && token && isJwt(token) && jwtId(token) && jwtId(token) === jwtId(reqTok)) {
+      // пока запрос шёл, соседний запрос этой вкладки уже взял новый вход того же человека (после смены пароля
+      // запросы идут пачкой) — повторяем с ним. Вход другого человека не повторяем: действие X не уйдёт от имени Y.
+      return api(path, opts, true);
+    }
     throw new Error('unauthorized');
   }
   if (!r.ok || data.ok === false) throw new Error(data.error || ('HTTP '+r.status));
@@ -1037,9 +1061,10 @@ document.getElementById('lBtn').onclick = doLogin;
 document.getElementById('lPass').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
 // hard=true — человек сам нажал «Выйти»: гасим и резервную куку сессии.
 // Без hard (истёк токен) куку НЕ трогаем: она может быть жива и молча вернёт сессию на следующем запуске.
-function logout(msg, hard){
+// keepShared=true — общий токен в localStorage принадлежит другому человеку (вошёл в соседней вкладке): не стираем его.
+function logout(msg, hard, keepShared){
   token=''; me=null; _sessionTok=null;
-  try{ localStorage.removeItem('canvas_token'); }catch(e){}
+  if(!keepShared){ try{ localStorage.removeItem('canvas_token'); }catch(e){} }
   if(hard){ try{ localStorage.removeItem('canvas_email'); }catch(e){} fetch(API+'/api/auth/logout',{method:'POST',credentials:'include'}).catch(()=>{}); }
   loginEl.classList.remove('hidden');
   prefillLogin();
@@ -4061,7 +4086,13 @@ async function openProfileCard(userId){
     catch(e){ showToast('Ошибка: '+e.message); }
   };
 }
-async function refreshMe(){ try{ const d=await api('/api/auth/me'); me=d.user; usersCache=null; renderAvaBtn(); }catch(e){} }
+// /api/auth/me отдаёт свежий токен (мог прийти и по куке — если токен этой вкладки уже отозван): берём его,
+// но только если это тот же человек — сервер чужую куку и так не примет, здесь вторая страховка.
+async function refreshMe(){ try{ const d=await api('/api/auth/me');
+  if(!me) return;   // пока шёл запрос, вкладка вышла на экран входа — молча возвращать вход не будем
+  if(d.user && d.user.id!==me.id){ logout('Сессия истекла — войдите ещё раз.', false, true); return; }
+  if(d.token && d.token!==token){ token=d.token; _sessionTok=token; try{ localStorage.setItem('canvas_token', token); }catch(e){} }
+  me=d.user; usersCache=null; renderAvaBtn(); }catch(e){} }
 // админ-панель: список пользователей, блокировка, создание, редактирование
 // Новый сотрудник — из вкладки «Команда» (отдельного списка пользователей нет: он и есть «Команда»).
 // Вид — один в один с карточкой сотрудника: аватар, имя, логин, пароль. Роли в интерфейсе нет.

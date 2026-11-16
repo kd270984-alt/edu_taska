@@ -190,19 +190,27 @@ app.get('/api/auth/me', async (req: AuthedRequest, res) => {
     // поэтому чужой странице нельзя дать ни малейшего шанса вычитать по куке свежий токен.
     const origin = String(req.headers.origin || '');
     const sameSite = !origin || origin === `https://${req.headers.host}` || origin === `http://${req.headers.host}`;
-    const tok = bearer && verifyToken(bearer) ? bearer : (sameSite ? readCookie(req.headers.cookie, SESSION_COOKIE) : '');
-    if (!tok || !verifyToken(tok)) {
-      res.setHeader('Set-Cookie', clearedSessionCookie());
-      res.status(401).json({ ok: false, error: 'unauthorized' });
-      return;
+    // Сначала Bearer, затем кука. Сверка с БД (sessionUser): заблокированный (active=false) или сменивший пароль
+    // (другое поколение входов, проверка 16.11) вылетает сразу, не дожидаясь истечения JWT.
+    // Bearer отозван — это ещё не конец: вкладка могла держать в памяти старый токен, а кука уже свежая
+    // (человек сменил свой пароль в соседней вкладке). Тогда пробуем куку — но только того же человека:
+    // иначе вкладка, где вошёл X, по куке Y молча стала бы Y. Bearer без подписи (мусор) — кука любого, как раньше.
+    const bearerClaim = bearer ? verifyToken(bearer) : null;
+    let ok = bearerClaim ? await sessionUser(bearer) : null;
+    const cookie = !ok && sameSite ? readCookie(req.headers.cookie, SESSION_COOKIE) : '';
+    let cookieDead = false;
+    if (!ok && cookie) {
+      const c = await sessionUser(cookie);
+      if (!c) cookieDead = true;
+      else if (!bearerClaim || c.id === bearerClaim.id) ok = c;
     }
-    // сверяем с БД: заблокированный (active=false) или сменивший пароль (другое поколение входов, проверка 16.11)
-    // вылетает сразу, не дожидаясь истечения JWT
-    const ok = await sessionUser(tok);
     const u = ok ? (await pool.query('select id, name, email, role, active, token_version, avatar_key, avatar_no, settings from users where id = $1', [ok.id])).rows[0] : null;
-    if (!u || !u.active || Number(u.token_version) !== ok!.tv) {
-      res.setHeader('Set-Cookie', clearedSessionCookie());
-      res.status(401).json({ ok: false, error: 'доступ отключён' });
+    if (!ok || !u || !u.active || Number(u.token_version) !== ok.tv) {
+      // Куку стираем, только если проверили её саму и она не прошла. Живую куку — которую не смотрели
+      // (отозван только Bearer, запрос с чужого сайта) или которая принадлежит другому человеку этого
+      // браузера — не трогаем: она ещё вернёт сессию своему хозяину.
+      if (cookieDead) res.setHeader('Set-Cookie', clearedSessionCookie());
+      res.status(401).json({ ok: false, error: bearerClaim || cookie ? 'доступ отключён' : 'unauthorized' });
       return;
     }
     // ПРОДЛЕНИЕ СЕССИИ: на каждом запуске приложения выдаём свежий токен на полный срок.
