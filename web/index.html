@@ -4255,10 +4255,13 @@ async function authMeResilient(){
   return null;
 }
 async function start(){
-  const myTok = token;   // сессия этого запуска
+  let myTok = token;   // сессия этого запуска
   const d = await authMeResilient();
   if(!d) return;                    // недействительная сессия — экран входа уже показан
-  if(token!==myTok) return;         // нас обогнал более свежий вход — тихо выходим (иначе моргание/двойной старт)
+  // нас обогнал вход ДРУГОГО человека — тихо выходим (иначе моргание/двойной старт). Тот же человек, а токен сменился
+  // (api() на 401 взял свежий из соседней вкладки, сменившей пароль) — продолжаем с новым: иначе пустая доска до F5
+  // (четвёртая проверка 16.11.2026)
+  if(token!==myTok){ const nid=jwtId(token); if(!nid||nid!==jwtId(myTok)) return; myTok=token; }   // пустой/мусорный — выходим
   me=d.user;
   try{ if(me&&me.email) localStorage.setItem('canvas_email', me.email); }catch(e){}
   if(_sessionTok===myTok) return;   // приложение уже поднято под этот токен — не дублируем интервалы/WS/поллинг

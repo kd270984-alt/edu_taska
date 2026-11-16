@@ -313,8 +313,11 @@ if ($newest) { [Console]::Out.WriteLine("Свежая копия базы: $($ne
 if ($env:TASKA_NO_OPEN -ne '1') { Start-Process explorer.exe -ArgumentList "`"$Dest`"" -ErrorAction SilentlyContinue }
 if ($FirstCode -ne 0) {
   $first1 = ''
-  try { $first1 = (Get-Content -LiteralPath (Join-Path $Dest 'Последняя копия.txt') -Encoding UTF8 -TotalCount 1) -replace '^ВНИМАНИЕ: ', '' } catch {}
+  # причина — только строка «ВНИМАНИЕ: …»; файла нет — без красной ошибки (-ErrorAction Stop ловит catch), иначе помощник
+  # принял бы её за причину; другая первая строка (итог прошлой установки) — не причина (пятая проверка 16.11.2026)
+  try { $l = "$(Get-Content -LiteralPath (Join-Path $Dest 'Последняя копия.txt') -Encoding UTF8 -TotalCount 1 -ErrorAction Stop)"; if ($l -match '^ВНИМАНИЕ: ') { $first1 = $l -replace '^ВНИМАНИЕ: ', '' } } catch {}
   if ($first.Code -eq 255 -and $first.Err -match 'killed') { $first1 = 'не уложилась во время установки (медленная связь) — её доделает задача в Планировщике в течение часа.' }
+  if (-not $first1) { $first1 = 'см. строки выше' }   # «Последняя копия.txt» нет или не прочитать — как на Mac (четвёртая проверка 16.11.2026)
   [Console]::Out.WriteLine('')
   [Console]::Out.WriteLine("НО ПЕРВАЯ КОПИЯ НЕ ВЫШЛА: $first1")
   exit 2
